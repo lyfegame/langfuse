@@ -50,8 +50,10 @@ function handleStorageError(err: unknown, operation: string): never {
       "Storage service temporarily unavailable due to network issues",
     );
   }
-  // For other errors, throw a generic error
-  throw Error(`Failed to ${operation}`);
+  // For other errors, throw with original message for debuggability
+  throw Error(
+    `Failed to ${operation}: ${err instanceof Error ? err.message : String(err)}`,
+  );
 }
 
 export interface StorageService {

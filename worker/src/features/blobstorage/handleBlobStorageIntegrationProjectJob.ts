@@ -368,11 +368,13 @@ export const handleBlobStorageIntegrationProjectJob = async (
       );
       await processBlobStorageExport({ ...executionConfig, table: "traces" });
     } else {
-      // Process tables based on exportSource setting
-      const processPromises: Promise<void>[] = [];
+      // Process tables sequentially to reduce peak memory and ClickHouse load.
+      // Parallel exports (Promise.all) caused ~4x concurrent memory pressure and
+      // S3 upload contention for large projects (18 GiB observations/hour).
+      const exportTasks: Array<() => Promise<void>> = [];
 
       // Always include scores
-      processPromises.push(
+      exportTasks.push(() =>
         processBlobStorageExport({ ...executionConfig, table: "scores" }),
       );
 
@@ -381,12 +383,14 @@ export const handleBlobStorageIntegrationProjectJob = async (
         blobStorageIntegration.exportSource === "TRACES_OBSERVATIONS" ||
         blobStorageIntegration.exportSource === "TRACES_OBSERVATIONS_EVENTS"
       ) {
-        processPromises.push(
-          processBlobStorageExport({ ...executionConfig, table: "traces" }),
-          processBlobStorageExport({
-            ...executionConfig,
-            table: "observations",
-          }),
+        exportTasks.push(
+          () =>
+            processBlobStorageExport({ ...executionConfig, table: "traces" }),
+          () =>
+            processBlobStorageExport({
+              ...executionConfig,
+              table: "observations",
+            }),
         );
       }
 
@@ -396,7 +400,7 @@ export const handleBlobStorageIntegrationProjectJob = async (
         blobStorageIntegration.exportSource === "EVENTS" ||
         blobStorageIntegration.exportSource === "TRACES_OBSERVATIONS_EVENTS"
       ) {
-        processPromises.push(
+        exportTasks.push(() =>
           processBlobStorageExport({
             ...executionConfig,
             table: "observations_v2",
@@ -404,7 +408,9 @@ export const handleBlobStorageIntegrationProjectJob = async (
         );
       }
 
-      await Promise.all(processPromises);
+      for (const task of exportTasks) {
+        await task();
+      }
     }
 
     // Determine if we've caught up with present-day data
