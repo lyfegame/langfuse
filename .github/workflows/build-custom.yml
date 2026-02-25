@@ -8,20 +8,21 @@ on:
   push:
     tags:
       - "v*-altera.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Image tag (e.g. v3.155.0-altera.1)"
+        required: true
 
 jobs:
-  build-and-push:
+  build-web:
     runs-on: ubuntu-latest
     permissions:
       packages: write
       contents: read
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Set NEXT_PUBLIC_BUILD_ID
-        run: echo "NEXT_PUBLIC_BUILD_ID=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -33,9 +34,14 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Extract tag version
+      - name: Determine tag
         id: version
-        run: echo "tag=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ inputs.tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
+          fi
 
       - name: Build and push web image
         uses: docker/build-push-action@v5
@@ -43,11 +49,38 @@ jobs:
           context: .
           file: ./web/Dockerfile
           push: true
-          tags: |
-            ghcr.io/lyfegame/langfuse-web:${{ steps.version.outputs.tag }}
+          tags: ghcr.io/lyfegame/langfuse-web:${{ steps.version.outputs.tag }}
           platforms: linux/amd64
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          build-args: |
+            NEXT_PUBLIC_BUILD_ID=${{ github.sha }}
+
+  build-worker:
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Determine tag
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ inputs.tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
+          fi
 
       - name: Build and push worker image
         uses: docker/build-push-action@v5
@@ -55,8 +88,7 @@ jobs:
           context: .
           file: ./worker/Dockerfile
           push: true
-          tags: |
-            ghcr.io/lyfegame/langfuse-worker:${{ steps.version.outputs.tag }}
+          tags: ghcr.io/lyfegame/langfuse-worker:${{ steps.version.outputs.tag }}
           platforms: linux/amd64
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          build-args: |
+            NEXT_PUBLIC_BUILD_ID=${{ github.sha }}
