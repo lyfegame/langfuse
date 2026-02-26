@@ -159,6 +159,16 @@ const EnvSchema = z.object({
     .optional()
     .transform((s) => (s ? s.split(",").map((id) => id.trim()) : [])),
 
+  // Chunk interval (ms) for catch-up exports. When the export cursor is more
+  // than one frequency period behind, use smaller chunks to reduce per-query
+  // ClickHouse memory. Default: 15 minutes (vs 1 hour for normal "hourly" exports).
+  // Set to 0 to disable (always use the full frequency interval).
+  LANGFUSE_BLOB_STORAGE_EXPORT_CATCHUP_INTERVAL_MS: z.coerce
+    .number()
+    .int()
+    .nonnegative()
+    .default(15 * 60 * 1000), // 15 minutes
+
   // Flags to toggle queue consumers on or off.
   QUEUE_CONSUMER_CLOUD_USAGE_METERING_QUEUE_IS_ENABLED: z
     .enum(["true", "false"])

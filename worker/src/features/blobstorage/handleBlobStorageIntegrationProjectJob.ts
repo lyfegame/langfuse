@@ -315,11 +315,28 @@ export const handleBlobStorageIntegrationProjectJob = async (
     blobStorageIntegration.exportFrequency,
   );
 
-  // Cap maxTimestamp to one frequency period ahead of minTimestamp
+  // Use smaller chunks when catching up to reduce per-query ClickHouse memory.
+  // Large observation tables with FINAL deduplication can peak at 100+ GiB for
+  // 1-hour windows; 15-minute chunks cut this to ~25 GiB.
+  const catchupIntervalMs = env.LANGFUSE_BLOB_STORAGE_EXPORT_CATCHUP_INTERVAL_MS;
+  const isCatchingUp =
+    catchupIntervalMs > 0 &&
+    minTimestamp.getTime() + frequencyIntervalMs < uncappedMaxTimestamp.getTime();
+  const chunkIntervalMs = isCatchingUp
+    ? Math.min(frequencyIntervalMs, catchupIntervalMs)
+    : frequencyIntervalMs;
+
+  if (isCatchingUp) {
+    logger.info(
+      `[BLOB INTEGRATION] Catch-up mode for project ${projectId}: using ${chunkIntervalMs / 1000}s chunks (lag: ${Math.round((uncappedMaxTimestamp.getTime() - minTimestamp.getTime()) / 3600000)}h)`,
+    );
+  }
+
+  // Cap maxTimestamp to one chunk ahead of minTimestamp
   // This ensures large historic exports are broken into manageable chunks
   const maxTimestamp = new Date(
     Math.min(
-      minTimestamp.getTime() + frequencyIntervalMs,
+      minTimestamp.getTime() + chunkIntervalMs,
       uncappedMaxTimestamp.getTime(),
     ),
   );
