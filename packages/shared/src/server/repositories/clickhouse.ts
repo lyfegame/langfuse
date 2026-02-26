@@ -314,22 +314,41 @@ export async function queryClickhouseParquetStream(opts: {
   clickhouseSettings?: ClickHouseSettings;
   preferredClickhouseService?: PreferredClickhouseService;
 }): Promise<Readable> {
-  const result = await clickhouseClient(
-    opts.clickhouseConfigs,
-    opts.preferredClickhouseService,
-  ).exec({
-    query: `${opts.query} FORMAT Parquet`,
-    query_params: opts.params,
-    clickhouse_settings: {
-      ...opts.clickhouseSettings,
-      output_format_parquet_compression_method: "zstd",
-      log_comment: JSON.stringify(opts.tags ?? {}),
-    },
+  const tracer = getTracer("clickhouse-query-parquet-stream");
+  const span = tracer.startSpan("clickhouse-query-parquet-stream", {
+    kind: SpanKind.CLIENT,
   });
 
-  // The exec() stream from @clickhouse/client-node is a Node.js Readable
-  // (HTTP IncomingMessage), safe to cast for StorageService.uploadFile
-  return result.stream as Readable;
+  try {
+    span.setAttribute("ch.query.text", opts.query);
+    span.setAttribute("db.system", "clickhouse");
+    span.setAttribute("db.query.text", opts.query);
+    span.setAttribute("db.operation.name", "SELECT");
+    span.setAttribute("ch.format", "Parquet");
+
+    const result = await clickhouseClient(
+      opts.clickhouseConfigs,
+      opts.preferredClickhouseService,
+    ).exec({
+      query: `${opts.query} FORMAT Parquet`,
+      query_params: opts.params,
+      clickhouse_settings: {
+        ...opts.clickhouseSettings,
+        output_format_parquet_compression_method: "zstd",
+        log_comment: JSON.stringify(opts.tags ?? {}),
+      },
+    });
+
+    span.setAttribute("ch.queryId", result.query_id);
+
+    // The exec() stream from @clickhouse/client-node is a Node.js Readable
+    // (HTTP IncomingMessage), safe to cast for StorageService.uploadFile
+    return result.stream as Readable;
+  } catch (error) {
+    throw ClickHouseResourceError.wrapIfResourceError(error as Error);
+  } finally {
+    span.end();
+  }
 }
 
 /**
