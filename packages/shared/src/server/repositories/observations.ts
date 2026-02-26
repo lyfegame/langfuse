@@ -1768,7 +1768,13 @@ export const getObservationsForBlobStorageExport = function (
   projectId: string,
   minTimestamp: Date,
   maxTimestamp: Date,
+  options?: { excludeOutput?: boolean },
 ) {
+  // The `output` column contains full LLM responses (avg ~237 KB/row) and
+  // dominates ClickHouse memory during FINAL deduplication. Excluding it
+  // drops per-query memory from ~100 GiB to ~10 GiB for large projects.
+  const outputColumn = options?.excludeOutput ? "" : "output,";
+
   const query = `
     SELECT
       id,
@@ -1785,7 +1791,7 @@ export const getObservationsForBlobStorageExport = function (
       status_message,
       version,
       input,
-      output,
+      ${outputColumn}
       provided_model_name,
       model_parameters,
       usage_details,
