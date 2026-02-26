@@ -335,6 +335,10 @@ export async function queryClickhouseParquetStream(opts: {
       clickhouse_settings: {
         ...opts.clickhouseSettings,
         output_format_parquet_compression_method: "zstd",
+        // Limit row group size to prevent Parquet's 2 GiB per-column-chunk limit.
+        // Observations with large input/output fields can exceed 2 GiB in a single
+        // row group; 5000 rows keeps each chunk well under the limit.
+        output_format_parquet_row_group_size: 5000,
         log_comment: JSON.stringify(opts.tags ?? {}),
       },
     });
