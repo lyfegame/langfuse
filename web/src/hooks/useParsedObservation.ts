@@ -30,7 +30,7 @@ import type {
  * Below this: sync parse (faster, no message-passing overhead)
  * Above this: Web Worker (non-blocking, prevents UI freeze)
  */
-const PARSE_IN_WEBWORKER_THRESHOLD = 100_000; // 100KB
+const PARSE_IN_WEBWORKER_THRESHOLD = 10_000; // 10KB — lowered to handle LangGraph 50-85KB payloads off-thread
 
 /**
  * Estimate the size of a value in characters (for threshold check)
