@@ -114,7 +114,20 @@ ClickhouseReadSkipCache.getInstance(prisma)
     logger.error("Error initializing ClickhouseReadSkipCache", err);
   });
 
-if (env.QUEUE_CONSUMER_TRACE_UPSERT_QUEUE_IS_ENABLED === "true") {
+// Worker role gating: "all" runs everything, "ingestion" skips blob storage
+// export, "export" runs only blob storage export queues.
+const workerRole = env.LANGFUSE_WORKER_ROLE;
+const isIngestion = workerRole === "all" || workerRole === "ingestion";
+const isExport = workerRole === "all" || workerRole === "export";
+
+if (workerRole !== "all") {
+  logger.info(`Worker role: ${workerRole}`);
+}
+
+if (
+  isIngestion &&
+  env.QUEUE_CONSUMER_TRACE_UPSERT_QUEUE_IS_ENABLED === "true"
+) {
   // Register workers for all trace upsert queue shards
   const traceUpsertShardNames = TraceUpsertQueue.getShardNames();
   traceUpsertShardNames.forEach((shardName) => {
@@ -128,7 +141,7 @@ if (env.QUEUE_CONSUMER_TRACE_UPSERT_QUEUE_IS_ENABLED === "true") {
   });
 }
 
-if (env.QUEUE_CONSUMER_CREATE_EVAL_QUEUE_IS_ENABLED === "true") {
+if (isIngestion && env.QUEUE_CONSUMER_CREATE_EVAL_QUEUE_IS_ENABLED === "true") {
   WorkerManager.register(
     QueueName.CreateEvalQueue,
     evalJobCreatorQueueProcessor,
@@ -143,7 +156,7 @@ if (env.QUEUE_CONSUMER_CREATE_EVAL_QUEUE_IS_ENABLED === "true") {
   );
 }
 
-if (env.LANGFUSE_S3_CORE_DATA_EXPORT_IS_ENABLED === "true") {
+if (isIngestion && env.LANGFUSE_S3_CORE_DATA_EXPORT_IS_ENABLED === "true") {
   // Instantiate the queue to trigger scheduled jobs
   CoreDataS3ExportQueue.getInstance();
   WorkerManager.register(
@@ -152,7 +165,10 @@ if (env.LANGFUSE_S3_CORE_DATA_EXPORT_IS_ENABLED === "true") {
   );
 }
 
-if (env.LANGFUSE_POSTGRES_METERING_DATA_EXPORT_IS_ENABLED === "true") {
+if (
+  isIngestion &&
+  env.LANGFUSE_POSTGRES_METERING_DATA_EXPORT_IS_ENABLED === "true"
+) {
   // Instantiate the queue to trigger scheduled jobs
   MeteringDataPostgresExportQueue.getInstance();
   WorkerManager.register(
@@ -168,7 +184,10 @@ if (env.LANGFUSE_POSTGRES_METERING_DATA_EXPORT_IS_ENABLED === "true") {
   );
 }
 
-if (env.QUEUE_CONSUMER_TRACE_DELETE_QUEUE_IS_ENABLED === "true") {
+if (
+  isIngestion &&
+  env.QUEUE_CONSUMER_TRACE_DELETE_QUEUE_IS_ENABLED === "true"
+) {
   WorkerManager.register(QueueName.TraceDelete, traceDeleteProcessor, {
     concurrency: env.LANGFUSE_TRACE_DELETE_CONCURRENCY,
     // Same configuration as EvaluationExecution or
@@ -184,7 +203,10 @@ if (env.QUEUE_CONSUMER_TRACE_DELETE_QUEUE_IS_ENABLED === "true") {
   });
 }
 
-if (env.QUEUE_CONSUMER_SCORE_DELETE_QUEUE_IS_ENABLED === "true") {
+if (
+  isIngestion &&
+  env.QUEUE_CONSUMER_SCORE_DELETE_QUEUE_IS_ENABLED === "true"
+) {
   WorkerManager.register(QueueName.ScoreDelete, scoreDeleteProcessor, {
     concurrency: env.LANGFUSE_SCORE_DELETE_CONCURRENCY,
     limiter: {
@@ -195,7 +217,10 @@ if (env.QUEUE_CONSUMER_SCORE_DELETE_QUEUE_IS_ENABLED === "true") {
   });
 }
 
-if (env.QUEUE_CONSUMER_DATASET_DELETE_QUEUE_IS_ENABLED === "true") {
+if (
+  isIngestion &&
+  env.QUEUE_CONSUMER_DATASET_DELETE_QUEUE_IS_ENABLED === "true"
+) {
   WorkerManager.register(QueueName.DatasetDelete, datasetDeleteProcessor, {
     concurrency: env.LANGFUSE_DATASET_DELETE_CONCURRENCY,
     limiter: {
@@ -206,7 +231,10 @@ if (env.QUEUE_CONSUMER_DATASET_DELETE_QUEUE_IS_ENABLED === "true") {
   });
 }
 
-if (env.QUEUE_CONSUMER_PROJECT_DELETE_QUEUE_IS_ENABLED === "true") {
+if (
+  isIngestion &&
+  env.QUEUE_CONSUMER_PROJECT_DELETE_QUEUE_IS_ENABLED === "true"
+) {
   WorkerManager.register(QueueName.ProjectDelete, projectDeleteProcessor, {
     concurrency: env.LANGFUSE_PROJECT_DELETE_CONCURRENCY,
     limiter: {
@@ -218,7 +246,10 @@ if (env.QUEUE_CONSUMER_PROJECT_DELETE_QUEUE_IS_ENABLED === "true") {
   });
 }
 
-if (env.QUEUE_CONSUMER_DATASET_RUN_ITEM_UPSERT_QUEUE_IS_ENABLED === "true") {
+if (
+  isIngestion &&
+  env.QUEUE_CONSUMER_DATASET_RUN_ITEM_UPSERT_QUEUE_IS_ENABLED === "true"
+) {
   WorkerManager.register(
     QueueName.DatasetRunItemUpsert,
     evalJobDatasetCreatorQueueProcessor,
@@ -228,7 +259,10 @@ if (env.QUEUE_CONSUMER_DATASET_RUN_ITEM_UPSERT_QUEUE_IS_ENABLED === "true") {
   );
 }
 
-if (env.QUEUE_CONSUMER_EVAL_EXECUTION_QUEUE_IS_ENABLED === "true") {
+if (
+  isIngestion &&
+  env.QUEUE_CONSUMER_EVAL_EXECUTION_QUEUE_IS_ENABLED === "true"
+) {
   WorkerManager.register(
     QueueName.EvaluationExecution,
     evalJobExecutorQueueProcessor,
@@ -257,7 +291,10 @@ if (env.QUEUE_CONSUMER_EVAL_EXECUTION_QUEUE_IS_ENABLED === "true") {
   );
 }
 
-if (env.QUEUE_CONSUMER_BATCH_EXPORT_QUEUE_IS_ENABLED === "true") {
+if (
+  isIngestion &&
+  env.QUEUE_CONSUMER_BATCH_EXPORT_QUEUE_IS_ENABLED === "true"
+) {
   WorkerManager.register(QueueName.BatchExport, batchExportQueueProcessor, {
     concurrency: 1, // only 1 job at a time
     limiter: {
@@ -268,7 +305,10 @@ if (env.QUEUE_CONSUMER_BATCH_EXPORT_QUEUE_IS_ENABLED === "true") {
   });
 }
 
-if (env.QUEUE_CONSUMER_BATCH_ACTION_QUEUE_IS_ENABLED === "true") {
+if (
+  isIngestion &&
+  env.QUEUE_CONSUMER_BATCH_ACTION_QUEUE_IS_ENABLED === "true"
+) {
   WorkerManager.register(
     QueueName.BatchActionQueue,
     batchActionQueueProcessor,
@@ -282,7 +322,10 @@ if (env.QUEUE_CONSUMER_BATCH_ACTION_QUEUE_IS_ENABLED === "true") {
   );
 }
 
-if (env.QUEUE_CONSUMER_OTEL_INGESTION_QUEUE_IS_ENABLED === "true") {
+if (
+  isIngestion &&
+  env.QUEUE_CONSUMER_OTEL_INGESTION_QUEUE_IS_ENABLED === "true"
+) {
   // Register workers for all ingestion queue shards
   const shardNames = OtelIngestionQueue.getShardNames();
   shardNames.forEach((shardName) => {
@@ -296,7 +339,7 @@ if (env.QUEUE_CONSUMER_OTEL_INGESTION_QUEUE_IS_ENABLED === "true") {
   });
 }
 
-if (env.QUEUE_CONSUMER_INGESTION_QUEUE_IS_ENABLED === "true") {
+if (isIngestion && env.QUEUE_CONSUMER_INGESTION_QUEUE_IS_ENABLED === "true") {
   // Register workers for all ingestion queue shards
   const shardNames = IngestionQueue.getShardNames();
   shardNames.forEach((shardName) => {
@@ -310,7 +353,10 @@ if (env.QUEUE_CONSUMER_INGESTION_QUEUE_IS_ENABLED === "true") {
   });
 }
 
-if (env.QUEUE_CONSUMER_INGESTION_SECONDARY_QUEUE_IS_ENABLED === "true") {
+if (
+  isIngestion &&
+  env.QUEUE_CONSUMER_INGESTION_SECONDARY_QUEUE_IS_ENABLED === "true"
+) {
   WorkerManager.register(
     QueueName.IngestionSecondaryQueue,
     ingestionQueueProcessorBuilder(false),
@@ -322,6 +368,7 @@ if (env.QUEUE_CONSUMER_INGESTION_SECONDARY_QUEUE_IS_ENABLED === "true") {
 }
 
 if (
+  isIngestion &&
   env.QUEUE_CONSUMER_CLOUD_USAGE_METERING_QUEUE_IS_ENABLED === "true" &&
   env.STRIPE_SECRET_KEY
 ) {
@@ -341,6 +388,7 @@ if (
 
 // Cloud Spend Alert Queue: Only enable in cloud environment with Stripe
 if (
+  isIngestion &&
   env.QUEUE_CONSUMER_CLOUD_SPEND_ALERT_QUEUE_IS_ENABLED === "true" &&
   env.STRIPE_SECRET_KEY
 ) {
@@ -362,6 +410,7 @@ if (
 
 // Free Tier Usage Threshold Queue: Only enable in cloud environment
 if (
+  isIngestion &&
   env.QUEUE_CONSUMER_FREE_TIER_USAGE_THRESHOLD_QUEUE_IS_ENABLED === "true" &&
   env.NEXT_PUBLIC_LANGFUSE_CLOUD_REGION && // Only in cloud deployments
   env.STRIPE_SECRET_KEY
@@ -382,7 +431,10 @@ if (
   );
 }
 
-if (env.QUEUE_CONSUMER_EXPERIMENT_CREATE_QUEUE_IS_ENABLED === "true") {
+if (
+  isIngestion &&
+  env.QUEUE_CONSUMER_EXPERIMENT_CREATE_QUEUE_IS_ENABLED === "true"
+) {
   WorkerManager.register(
     QueueName.ExperimentCreate,
     experimentCreateQueueProcessor,
@@ -392,7 +444,10 @@ if (env.QUEUE_CONSUMER_EXPERIMENT_CREATE_QUEUE_IS_ENABLED === "true") {
   );
 }
 
-if (env.QUEUE_CONSUMER_POSTHOG_INTEGRATION_QUEUE_IS_ENABLED === "true") {
+if (
+  isIngestion &&
+  env.QUEUE_CONSUMER_POSTHOG_INTEGRATION_QUEUE_IS_ENABLED === "true"
+) {
   // Instantiate the queue to trigger scheduled jobs
   PostHogIntegrationQueue.getInstance();
 
@@ -425,7 +480,10 @@ if (env.QUEUE_CONSUMER_POSTHOG_INTEGRATION_QUEUE_IS_ENABLED === "true") {
   );
 }
 
-if (env.QUEUE_CONSUMER_MIXPANEL_INTEGRATION_QUEUE_IS_ENABLED === "true") {
+if (
+  isIngestion &&
+  env.QUEUE_CONSUMER_MIXPANEL_INTEGRATION_QUEUE_IS_ENABLED === "true"
+) {
   // Instantiate the queue to trigger scheduled jobs
   MixpanelIntegrationQueue.getInstance();
 
@@ -458,7 +516,10 @@ if (env.QUEUE_CONSUMER_MIXPANEL_INTEGRATION_QUEUE_IS_ENABLED === "true") {
   );
 }
 
-if (env.QUEUE_CONSUMER_BLOB_STORAGE_INTEGRATION_QUEUE_IS_ENABLED === "true") {
+if (
+  isExport &&
+  env.QUEUE_CONSUMER_BLOB_STORAGE_INTEGRATION_QUEUE_IS_ENABLED === "true"
+) {
   // Instantiate the queue to trigger scheduled jobs
   BlobStorageIntegrationQueue.getInstance();
 
@@ -486,7 +547,10 @@ if (env.QUEUE_CONSUMER_BLOB_STORAGE_INTEGRATION_QUEUE_IS_ENABLED === "true") {
   );
 }
 
-if (env.QUEUE_CONSUMER_DATA_RETENTION_QUEUE_IS_ENABLED === "true") {
+if (
+  isIngestion &&
+  env.QUEUE_CONSUMER_DATA_RETENTION_QUEUE_IS_ENABLED === "true"
+) {
   // Instantiate the queue to trigger scheduled jobs
   DataRetentionQueue.getInstance();
 
@@ -509,7 +573,10 @@ if (env.QUEUE_CONSUMER_DATA_RETENTION_QUEUE_IS_ENABLED === "true") {
   );
 }
 
-if (env.QUEUE_CONSUMER_DEAD_LETTER_RETRY_QUEUE_IS_ENABLED === "true") {
+if (
+  isIngestion &&
+  env.QUEUE_CONSUMER_DEAD_LETTER_RETRY_QUEUE_IS_ENABLED === "true"
+) {
   // Instantiate the queue to trigger scheduled jobs
   DeadLetterRetryQueue.getInstance();
 
@@ -522,13 +589,16 @@ if (env.QUEUE_CONSUMER_DEAD_LETTER_RETRY_QUEUE_IS_ENABLED === "true") {
   );
 }
 
-if (env.QUEUE_CONSUMER_WEBHOOK_QUEUE_IS_ENABLED === "true") {
+if (isIngestion && env.QUEUE_CONSUMER_WEBHOOK_QUEUE_IS_ENABLED === "true") {
   WorkerManager.register(QueueName.WebhookQueue, webhookProcessor, {
     concurrency: env.LANGFUSE_WEBHOOK_QUEUE_PROCESSING_CONCURRENCY,
   });
 }
 
-if (env.QUEUE_CONSUMER_ENTITY_CHANGE_QUEUE_IS_ENABLED === "true") {
+if (
+  isIngestion &&
+  env.QUEUE_CONSUMER_ENTITY_CHANGE_QUEUE_IS_ENABLED === "true"
+) {
   WorkerManager.register(
     QueueName.EntityChangeQueue,
     entityChangeQueueProcessor,
@@ -539,6 +609,7 @@ if (env.QUEUE_CONSUMER_ENTITY_CHANGE_QUEUE_IS_ENABLED === "true") {
 }
 
 if (
+  isIngestion &&
   env.QUEUE_CONSUMER_EVENT_PROPAGATION_QUEUE_IS_ENABLED === "true" &&
   env.LANGFUSE_EXPERIMENT_INSERT_INTO_EVENTS_TABLE === "true"
 ) {
@@ -554,7 +625,10 @@ if (
   );
 }
 
-if (env.QUEUE_CONSUMER_NOTIFICATION_QUEUE_IS_ENABLED === "true") {
+if (
+  isIngestion &&
+  env.QUEUE_CONSUMER_NOTIFICATION_QUEUE_IS_ENABLED === "true"
+) {
   WorkerManager.register(
     QueueName.NotificationQueue,
     notificationQueueProcessor,
@@ -567,7 +641,7 @@ if (env.QUEUE_CONSUMER_NOTIFICATION_QUEUE_IS_ENABLED === "true") {
 // Batch project cleaners for bulk deletion of ClickHouse data
 export const batchProjectCleaners: BatchProjectCleaner[] = [];
 
-if (env.LANGFUSE_BATCH_PROJECT_CLEANER_ENABLED === "true") {
+if (isIngestion && env.LANGFUSE_BATCH_PROJECT_CLEANER_ENABLED === "true") {
   for (const table of BATCH_DELETION_TABLES) {
     // Only start the events table cleaners if the events table experiment is enabled
     if (
@@ -586,7 +660,10 @@ if (env.LANGFUSE_BATCH_PROJECT_CLEANER_ENABLED === "true") {
 // Batch data retention cleaners for bulk deletion of expired ClickHouse data
 export const batchDataRetentionCleaners: BatchDataRetentionCleaner[] = [];
 
-if (env.LANGFUSE_BATCH_DATA_RETENTION_CLEANER_ENABLED === "true") {
+if (
+  isIngestion &&
+  env.LANGFUSE_BATCH_DATA_RETENTION_CLEANER_ENABLED === "true"
+) {
   for (const table of BATCH_DATA_RETENTION_TABLES) {
     // Only start the events table cleaners if the events table experiment is enabled
     if (
@@ -605,7 +682,10 @@ if (env.LANGFUSE_BATCH_DATA_RETENTION_CLEANER_ENABLED === "true") {
 // Media retention cleaner for media files and blob storage
 export let mediaRetentionCleaner: MediaRetentionCleaner | null = null;
 
-if (env.LANGFUSE_BATCH_DATA_RETENTION_CLEANER_ENABLED === "true") {
+if (
+  isIngestion &&
+  env.LANGFUSE_BATCH_DATA_RETENTION_CLEANER_ENABLED === "true"
+) {
   mediaRetentionCleaner = new MediaRetentionCleaner();
   mediaRetentionCleaner.start();
 }
@@ -613,7 +693,10 @@ if (env.LANGFUSE_BATCH_DATA_RETENTION_CLEANER_ENABLED === "true") {
 // Batch trace deletion cleaner for supplementary trace deletion
 export let batchTraceDeletionCleaner: BatchTraceDeletionCleaner | null = null;
 
-if (env.LANGFUSE_BATCH_TRACE_DELETION_CLEANER_ENABLED === "true") {
+if (
+  isIngestion &&
+  env.LANGFUSE_BATCH_TRACE_DELETION_CLEANER_ENABLED === "true"
+) {
   batchTraceDeletionCleaner = new BatchTraceDeletionCleaner();
   batchTraceDeletionCleaner.start();
 }

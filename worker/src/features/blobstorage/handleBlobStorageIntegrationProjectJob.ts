@@ -19,6 +19,7 @@ import {
   BlobStorageIntegrationProcessingQueue,
   queryClickhouse,
   QueueJobs,
+  recordHistogram,
 } from "@langfuse/shared/src/server";
 import {
   BlobStorageIntegrationType,
@@ -162,6 +163,8 @@ const processBlobStorageExport = async (config: {
   table: "traces" | "observations" | "scores" | "observations_v2"; // observations_v2 is the events table
   fileType: BlobStorageIntegrationFileType;
 }) => {
+  const exportStartTime = Date.now();
+
   logger.info(
     `[BLOB INTEGRATION] Processing ${config.table} export for project ${config.projectId}`,
   );
@@ -249,14 +252,27 @@ const processBlobStorageExport = async (config: {
       });
     }
 
-    logger.info(
-      `[BLOB INTEGRATION] Successfully exported ${config.table} records for project ${config.projectId}`,
-    );
+    const durationMs = Date.now() - exportStartTime;
+    logger.info({
+      message: `[BLOB INTEGRATION] Successfully exported ${config.table} records for project ${config.projectId}`,
+      table: config.table,
+      projectId: config.projectId,
+      windowStart: config.minTimestamp.toISOString(),
+      windowEnd: config.maxTimestamp.toISOString(),
+      durationMs,
+    });
+    recordHistogram("langfuse.blob_export.table_duration_ms", durationMs, {
+      table: config.table,
+    });
   } catch (error) {
-    logger.error(
-      `[BLOB INTEGRATION] Error exporting ${config.table} for project ${config.projectId}`,
+    const durationMs = Date.now() - exportStartTime;
+    logger.error({
+      message: `[BLOB INTEGRATION] Error exporting ${config.table} for project ${config.projectId}`,
+      table: config.table,
+      projectId: config.projectId,
+      durationMs,
       error,
-    );
+    });
     throw error;
   }
 };
@@ -319,10 +335,12 @@ export const handleBlobStorageIntegrationProjectJob = async (
   // Use smaller chunks when catching up to reduce per-query ClickHouse memory.
   // Large observation tables can peak at high memory for wide time windows;
   // 15-minute chunks keep memory bounded.
-  const catchupIntervalMs = env.LANGFUSE_BLOB_STORAGE_EXPORT_CATCHUP_INTERVAL_MS;
+  const catchupIntervalMs =
+    env.LANGFUSE_BLOB_STORAGE_EXPORT_CATCHUP_INTERVAL_MS;
   const isCatchingUp =
     catchupIntervalMs > 0 &&
-    minTimestamp.getTime() + frequencyIntervalMs < uncappedMaxTimestamp.getTime();
+    minTimestamp.getTime() + frequencyIntervalMs <
+      uncappedMaxTimestamp.getTime();
   const chunkIntervalMs = isCatchingUp
     ? Math.min(frequencyIntervalMs, catchupIntervalMs)
     : frequencyIntervalMs;
@@ -481,14 +499,25 @@ export const handleBlobStorageIntegrationProjectJob = async (
       }
     }
 
-    logger.info(
-      `[BLOB INTEGRATION] Successfully processed blob storage integration for project ${projectId}`,
-    );
+    const jobDurationMs = Date.now() - now.getTime();
+    logger.info({
+      message: `[BLOB INTEGRATION] Successfully processed blob storage integration for project ${projectId}`,
+      projectId,
+      windowStart: minTimestamp.toISOString(),
+      windowEnd: maxTimestamp.toISOString(),
+      durationMs: jobDurationMs,
+      mode: isCatchingUp ? "catchup" : "steady",
+      caughtUp,
+    });
+    recordHistogram("langfuse.blob_export.job_duration_ms", jobDurationMs, {
+      mode: isCatchingUp ? "catchup" : "steady",
+    });
   } catch (error) {
-    logger.error(
-      `[BLOB INTEGRATION] Error processing blob storage integration for project ${projectId}`,
+    logger.error({
+      message: `[BLOB INTEGRATION] Error processing blob storage integration for project ${projectId}`,
+      projectId,
       error,
-    );
+    });
     throw error; // Rethrow to trigger retries
   }
 };
