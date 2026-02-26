@@ -32,7 +32,7 @@ export class BlobStorageIntegrationProcessingQueue {
             attempts: 5,
             backoff: {
               type: "exponential",
-              delay: 30000, // 30s initial backoff — prevents retry death loop on ClickHouse memory kills
+              delay: 5000,
             },
           },
         })

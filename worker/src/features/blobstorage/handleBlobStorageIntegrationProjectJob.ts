@@ -158,7 +158,6 @@ const processBlobStorageExport = async (config: {
   type: BlobStorageIntegrationType;
   table: "traces" | "observations" | "scores" | "observations_v2"; // observations_v2 is the events table
   fileType: BlobStorageIntegrationFileType;
-  excludeObservationOutput?: boolean;
 }) => {
   logger.info(
     `[BLOB INTEGRATION] Processing ${config.table} export for project ${config.projectId}`,
@@ -204,7 +203,6 @@ const processBlobStorageExport = async (config: {
           config.projectId,
           config.minTimestamp,
           config.maxTimestamp,
-          { excludeOutput: config.excludeObservationOutput },
         );
         break;
       case "scores":
@@ -363,14 +361,6 @@ export const handleBlobStorageIntegrationProjectJob = async (
         projectId,
       );
 
-    // Check if this project should exclude the `output` column from observations exports.
-    // The output column contains full LLM responses (~237 KB/row) and dominates ClickHouse
-    // memory during FINAL deduplication (~90% of 159 GiB data read per hourly window).
-    const excludeObservationOutput =
-      env.LANGFUSE_BLOB_STORAGE_EXPORT_EXCLUDE_OBSERVATION_OUTPUT_PROJECT_IDS.includes(
-        projectId,
-      );
-
     if (isTraceOnlyProject) {
       // Only process traces table for projects in the trace-only list (legacy behavior)
       logger.info(
@@ -400,7 +390,6 @@ export const handleBlobStorageIntegrationProjectJob = async (
             processBlobStorageExport({
               ...executionConfig,
               table: "observations",
-              excludeObservationOutput: excludeObservationOutput,
             }),
         );
       }

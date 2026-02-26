@@ -159,15 +159,6 @@ const EnvSchema = z.object({
     .optional()
     .transform((s) => (s ? s.split(",").map((id) => id.trim()) : [])),
 
-  // Comma-separated list of project IDs that should exclude the `output` column
-  // from observations exports. The output column contains full LLM responses and
-  // dominates ClickHouse memory during FINAL deduplication (~90% of 159 GiB reads).
-  // Excluding it drops per-query memory from ~100 GiB to ~10 GiB.
-  LANGFUSE_BLOB_STORAGE_EXPORT_EXCLUDE_OBSERVATION_OUTPUT_PROJECT_IDS: z
-    .string()
-    .optional()
-    .transform((s) => (s ? s.split(",").map((id) => id.trim()) : [])),
-
   // Flags to toggle queue consumers on or off.
   QUEUE_CONSUMER_CLOUD_USAGE_METERING_QUEUE_IS_ENABLED: z
     .enum(["true", "false"])
