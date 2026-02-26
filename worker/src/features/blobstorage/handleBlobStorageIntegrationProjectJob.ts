@@ -198,11 +198,12 @@ const processBlobStorageExport = async (config: {
     if (useParquet) {
       const filePath = `${config.prefix ?? ""}${config.projectId}/${config.table}/${timestamp}.parquet`;
 
+      const table = config.table as "traces" | "observations" | "scores";
       const parquetStreamFn = {
         traces: getTracesForBlobStorageExportParquet,
         observations: getObservationsForBlobStorageExportParquet,
         scores: getScoresForBlobStorageExportParquet,
-      }[config.table]!;
+      }[table];
 
       const stream = await parquetStreamFn(
         config.projectId,
