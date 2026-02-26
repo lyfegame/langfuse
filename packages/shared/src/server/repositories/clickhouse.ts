@@ -1,3 +1,4 @@
+import { Readable } from "stream";
 import { env } from "../../env";
 import {
   clickhouseClient,
@@ -298,6 +299,37 @@ export async function* queryClickhouseStream<T>(opts: {
   } finally {
     span.end();
   }
+}
+
+/**
+ * Query ClickHouse and return results as a raw Parquet binary stream.
+ * Uses ClickHouse's native Parquet output with zstd compression,
+ * bypassing JSON parsing entirely for efficient binary export.
+ */
+export async function queryClickhouseParquetStream(opts: {
+  query: string;
+  params?: Record<string, unknown>;
+  clickhouseConfigs?: NodeClickHouseClientConfigOptions;
+  tags?: Record<string, string>;
+  clickhouseSettings?: ClickHouseSettings;
+  preferredClickhouseService?: PreferredClickhouseService;
+}): Promise<Readable> {
+  const result = await clickhouseClient(
+    opts.clickhouseConfigs,
+    opts.preferredClickhouseService,
+  ).exec({
+    query: `${opts.query} FORMAT Parquet`,
+    query_params: opts.params,
+    clickhouse_settings: {
+      ...opts.clickhouseSettings,
+      output_format_parquet_compression_method: "zstd",
+      log_comment: JSON.stringify(opts.tags ?? {}),
+    },
+  });
+
+  // The exec() stream from @clickhouse/client-node is a Node.js Readable
+  // (HTTP IncomingMessage), safe to cast for StorageService.uploadFile
+  return result.stream as Readable;
 }
 
 /**

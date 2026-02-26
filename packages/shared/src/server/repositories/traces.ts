@@ -3,6 +3,7 @@ import {
   parseClickhouseUTCDateTimeFormat,
   queryClickhouse,
   queryClickhouseStream,
+  queryClickhouseParquetStream,
   upsertClickhouse,
 } from "./clickhouse";
 import {
@@ -1348,13 +1349,66 @@ export const getTracesForBlobStorageExport = function (
       tags,
       input as input,
       output as output
-    FROM ${traceTable} FINAL
+    FROM ${traceTable}
     WHERE project_id = {projectId: String}
     AND timestamp >= {minTimestamp: DateTime64(3)}
     AND timestamp <= {maxTimestamp: DateTime64(3)}
+    AND is_deleted = 0
+    ORDER BY id, event_ts DESC
+    LIMIT 1 BY id
   `;
 
   return queryClickhouseStream<Record<string, unknown>>({
+    query,
+    params: {
+      projectId,
+      minTimestamp: convertDateToClickhouseDateTime(minTimestamp),
+      maxTimestamp: convertDateToClickhouseDateTime(maxTimestamp),
+    },
+    tags: {
+      feature: "blobstorage",
+      type: "trace",
+      kind: "analytic",
+      projectId,
+    },
+    clickhouseConfigs: {
+      request_timeout: env.LANGFUSE_CLICKHOUSE_DATA_EXPORT_REQUEST_TIMEOUT_MS,
+    },
+  });
+};
+
+export const getTracesForBlobStorageExportParquet = function (
+  projectId: string,
+  minTimestamp: Date,
+  maxTimestamp: Date,
+) {
+  const query = `
+    SELECT
+      id,
+      timestamp,
+      name,
+      environment,
+      project_id,
+      metadata,
+      user_id,
+      session_id,
+      release,
+      version,
+      public as public,
+      bookmarked as bookmarked,
+      tags,
+      input as input,
+      output as output
+    FROM traces
+    WHERE project_id = {projectId: String}
+    AND timestamp >= {minTimestamp: DateTime64(3)}
+    AND timestamp <= {maxTimestamp: DateTime64(3)}
+    AND is_deleted = 0
+    ORDER BY id, event_ts DESC
+    LIMIT 1 BY id
+  `;
+
+  return queryClickhouseParquetStream({
     query,
     params: {
       projectId,

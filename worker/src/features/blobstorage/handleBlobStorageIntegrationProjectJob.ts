@@ -11,6 +11,9 @@ import {
   getObservationsForBlobStorageExport,
   getTracesForBlobStorageExport,
   getScoresForBlobStorageExport,
+  getObservationsForBlobStorageExportParquet,
+  getTracesForBlobStorageExportParquet,
+  getScoresForBlobStorageExportParquet,
   getEventsForBlobStorageExport,
   getCurrentSpan,
   BlobStorageIntegrationProcessingQueue,
@@ -178,75 +181,72 @@ const processBlobStorageExport = async (config: {
   });
 
   try {
-    const blobStorageProps = getFileTypeProperties(config.fileType);
-
     // Create the file path with prefix if available
     const timestamp = config.maxTimestamp
       .toISOString()
       .replace(/:/g, "-")
       .substring(0, 19);
-    const filePath = `${config.prefix ?? ""}${config.projectId}/${config.table}/${timestamp}.${blobStorageProps.extension}`;
 
-    // Fetch data based on table type
-    let dataStream: AsyncGenerator<Record<string, unknown>>;
+    // Use Parquet for traces/observations/scores (native ClickHouse output with zstd).
+    // Events (observations_v2) use the legacy JSON→transform path since they use
+    // EventsQueryBuilder which already handles dedup without FINAL.
+    const useParquet =
+      config.table === "traces" ||
+      config.table === "observations" ||
+      config.table === "scores";
 
-    switch (config.table) {
-      case "traces":
-        dataStream = getTracesForBlobStorageExport(
-          config.projectId,
-          config.minTimestamp,
-          config.maxTimestamp,
-        );
-        break;
-      case "observations":
-        dataStream = getObservationsForBlobStorageExport(
-          config.projectId,
-          config.minTimestamp,
-          config.maxTimestamp,
-        );
-        break;
-      case "scores":
-        dataStream = getScoresForBlobStorageExport(
-          config.projectId,
-          config.minTimestamp,
-          config.maxTimestamp,
-        );
-        break;
-      case "observations_v2": // observations_v2 is the events table
-        dataStream = getEventsForBlobStorageExport(
-          config.projectId,
-          config.minTimestamp,
-          config.maxTimestamp,
-        );
-        break;
-      default:
-        throw new Error(`Unsupported table type: ${config.table}`);
+    if (useParquet) {
+      const filePath = `${config.prefix ?? ""}${config.projectId}/${config.table}/${timestamp}.parquet`;
+
+      const parquetStreamFn = {
+        traces: getTracesForBlobStorageExportParquet,
+        observations: getObservationsForBlobStorageExportParquet,
+        scores: getScoresForBlobStorageExportParquet,
+      }[config.table]!;
+
+      const stream = await parquetStreamFn(
+        config.projectId,
+        config.minTimestamp,
+        config.maxTimestamp,
+      );
+
+      await storageService.uploadFile({
+        fileName: filePath,
+        fileType: "application/vnd.apache.parquet",
+        data: stream,
+        partSize: 100 * 1024 * 1024, // 100 MB part size
+      });
+    } else {
+      // Legacy path for events (observations_v2): JSON → transform → upload
+      const blobStorageProps = getFileTypeProperties(config.fileType);
+      const filePath = `${config.prefix ?? ""}${config.projectId}/${config.table}/${timestamp}.${blobStorageProps.extension}`;
+
+      const dataStream = getEventsForBlobStorageExport(
+        config.projectId,
+        config.minTimestamp,
+        config.maxTimestamp,
+      );
+
+      const fileStream = pipeline(
+        dataStream,
+        streamTransformations[config.fileType](),
+        (err) => {
+          if (err) {
+            logger.error(
+              "[BLOB INTEGRATION] Getting data from DB for blob storage integration failed: ",
+              err,
+            );
+          }
+        },
+      );
+
+      await storageService.uploadFile({
+        fileName: filePath,
+        fileType: blobStorageProps.contentType,
+        data: fileStream,
+        partSize: 100 * 1024 * 1024, // 100 MB part size
+      });
     }
-
-    const fileStream = pipeline(
-      dataStream,
-      streamTransformations[config.fileType](),
-      (err) => {
-        if (err) {
-          logger.error(
-            "[BLOB INTEGRATION] Getting data from DB for blob storage integration failed: ",
-            err,
-          );
-        }
-      },
-    );
-
-    // Upload the file to cloud storage
-    // For CSV exports, use larger part size to handle big files
-    // 100 MB parts support files up to ~1 TB (100 MB × 10,000 AWS limit)
-    // This prevents hitting AWS's 10,000 part limit on large exports
-
-    await storageService.uploadFile({
-      fileName: filePath,
-      fileType: blobStorageProps.contentType,
-      data: fileStream,
-      partSize: 100 * 1024 * 1024, // 100 MB part size
-    });
 
     logger.info(
       `[BLOB INTEGRATION] Successfully exported ${config.table} records for project ${config.projectId}`,
@@ -316,8 +316,8 @@ export const handleBlobStorageIntegrationProjectJob = async (
   );
 
   // Use smaller chunks when catching up to reduce per-query ClickHouse memory.
-  // Large observation tables with FINAL deduplication can peak at 100+ GiB for
-  // 1-hour windows; 15-minute chunks cut this to ~25 GiB.
+  // Large observation tables can peak at high memory for wide time windows;
+  // 15-minute chunks keep memory bounded.
   const catchupIntervalMs = env.LANGFUSE_BLOB_STORAGE_EXPORT_CATCHUP_INTERVAL_MS;
   const isCatchingUp =
     catchupIntervalMs > 0 &&

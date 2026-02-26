@@ -9,6 +9,7 @@ import {
   commandClickhouse,
   queryClickhouse,
   queryClickhouseStream,
+  queryClickhouseParquetStream,
   upsertClickhouse,
 } from "./clickhouse";
 import { FilterList, orderByToClickhouseSql } from "../queries";
@@ -1792,11 +1793,14 @@ export const getScoresForBlobStorageExport = function (
       comment,
       data_type,
       string_value
-    FROM scores FINAL
+    FROM scores
     WHERE project_id = {projectId: String}
     AND timestamp >= {minTimestamp: DateTime64(3)}
     AND timestamp <= {maxTimestamp: DateTime64(3)}
+    AND is_deleted = 0
     AND data_type IN ({dataTypes: Array(String)})
+    ORDER BY id, event_ts DESC
+    LIMIT 1 BY id
   `;
 
   const records = queryClickhouseStream<Record<string, unknown>>({
@@ -1819,6 +1823,55 @@ export const getScoresForBlobStorageExport = function (
   });
 
   return records;
+};
+
+export const getScoresForBlobStorageExportParquet = function (
+  projectId: string,
+  minTimestamp: Date,
+  maxTimestamp: Date,
+) {
+  const query = `
+    SELECT
+      id,
+      timestamp,
+      project_id,
+      environment,
+      trace_id,
+      observation_id,
+      name,
+      value,
+      source,
+      comment,
+      data_type,
+      string_value
+    FROM scores
+    WHERE project_id = {projectId: String}
+    AND timestamp >= {minTimestamp: DateTime64(3)}
+    AND timestamp <= {maxTimestamp: DateTime64(3)}
+    AND is_deleted = 0
+    AND data_type IN ({dataTypes: Array(String)})
+    ORDER BY id, event_ts DESC
+    LIMIT 1 BY id
+  `;
+
+  return queryClickhouseParquetStream({
+    query,
+    params: {
+      projectId,
+      minTimestamp: convertDateToClickhouseDateTime(minTimestamp),
+      maxTimestamp: convertDateToClickhouseDateTime(maxTimestamp),
+      dataTypes: AGGREGATABLE_SCORE_TYPES,
+    },
+    tags: {
+      feature: "blobstorage",
+      type: "score",
+      kind: "analytic",
+      projectId,
+    },
+    clickhouseConfigs: {
+      request_timeout: env.LANGFUSE_CLICKHOUSE_DATA_EXPORT_REQUEST_TIMEOUT_MS,
+    },
+  });
 };
 
 export const getScoresForAnalyticsIntegrations = async function* (
