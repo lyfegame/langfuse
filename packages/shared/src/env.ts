@@ -260,6 +260,11 @@ const EnvSchema = z.object({
     .int()
     .nonnegative()
     .default(2),
+  // max_memory_usage caps memory per query — ClickHouse kills the query on breach
+  // instead of OOMing the server. Adaptive window splitting retries with smaller chunks.
+  LANGFUSE_CLICKHOUSE_DATA_EXPORT_MAX_MEMORY_USAGE: z
+    .string()
+    .default("20000000000"), // 20 GiB — string because ClickHouse UInt64 settings are string-typed
 
   LANGFUSE_EVENT_PROPAGATION_WORKER_GLOBAL_CONCURRENCY: z.coerce
     .number()

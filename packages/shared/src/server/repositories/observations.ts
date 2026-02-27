@@ -1879,6 +1879,7 @@ export const getObservationsForBlobStorageExportParquet = function (
       request_timeout: env.LANGFUSE_CLICKHOUSE_DATA_EXPORT_REQUEST_TIMEOUT_MS,
     },
     clickhouseSettings: {
+      max_memory_usage: env.LANGFUSE_CLICKHOUSE_DATA_EXPORT_MAX_MEMORY_USAGE,
       max_threads: env.LANGFUSE_CLICKHOUSE_DATA_EXPORT_MAX_THREADS,
       priority: String(env.LANGFUSE_CLICKHOUSE_DATA_EXPORT_PRIORITY),
     },
