@@ -337,9 +337,12 @@ export async function queryClickhouseParquetStream(opts: {
         output_format_parquet_compression_method: "zstd",
         // Limit row group size to prevent Parquet's 2 GiB per-column-chunk limit.
         // Observations with large input/output fields can exceed 2 GiB in a single
-        // row group; 500 rows keeps each chunk well under the limit even for
+        // row group; default 500 rows keeps each chunk well under the limit even for
         // projects with ~430 KB average per observation string column.
-        output_format_parquet_row_group_size: "500",
+        // Configurable via LANGFUSE_CLICKHOUSE_DATA_EXPORT_PARQUET_ROW_GROUP_SIZE.
+        output_format_parquet_row_group_size: String(
+          env.LANGFUSE_CLICKHOUSE_DATA_EXPORT_PARQUET_ROW_GROUP_SIZE,
+        ),
         log_comment: JSON.stringify(opts.tags ?? {}),
       },
     });
