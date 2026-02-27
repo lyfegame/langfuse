@@ -10,7 +10,8 @@ export type ClickhouseClientType = ReturnType<typeof createClient>;
 export type PreferredClickhouseService =
   | "ReadWrite"
   | "ReadOnly"
-  | "EventsReadOnly";
+  | "EventsReadOnly"
+  | "Export";
 
 /**
  * ClickHouseClientManager provides a singleton pattern for managing ClickHouse clients.
@@ -73,6 +74,8 @@ export class ClickHouseClientManager {
     switch (preferredClickhouseService) {
       case "ReadWrite":
         return env.CLICKHOUSE_URL;
+      case "Export":
+        return env.CLICKHOUSE_EXPORT_URL || env.CLICKHOUSE_URL;
       case "EventsReadOnly":
         return (
           env.CLICKHOUSE_EVENTS_READ_ONLY_URL ||

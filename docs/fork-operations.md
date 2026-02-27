@@ -20,13 +20,14 @@ This guide covers deploying and operating `lyfegame/langfuse` to support three c
                           ClickHouse
 ```
 
-Three layers of isolation prevent workloads from interfering:
+Four layers of isolation prevent workloads from interfering:
 
 | Layer | What it does | How |
 |---|---|---|
 | **Process** | Separates export from ingestion at the OS level | `LANGFUSE_WORKER_ROLE` env var |
-| **Query** | Limits each export query's ClickHouse resources | `max_memory_usage`, `max_threads`, `priority` |
+| **Query** | Limits each export query's ClickHouse resources | `max_memory_usage`, `max_threads`, `priority` (client-side) |
 | **Query size** | Automatically shrinks queries that fail | Adaptive window splitting |
+| **Service routing** | Routes exports to dedicated ClickHouse user with server-enforced limits | `CLICKHOUSE_EXPORT_URL` + `docs/clickhouse-users.xml` |
 
 ---
 
@@ -56,9 +57,27 @@ env:
 
 Per-queue `QUEUE_CONSUMER_*_IS_ENABLED` flags remain as fine-grained overrides within each role.
 
+### ClickHouse Export Service Routing
+
+Export queries can be routed to a dedicated ClickHouse URL (typically a separate ClickHouse user with server-enforced resource profiles):
+
+| Env var | Default | Effect |
+|---|---|---|
+| `CLICKHOUSE_EXPORT_URL` | (falls back to `CLICKHOUSE_URL`) | ClickHouse URL for export queries. Set to a URL with export-specific user credentials (e.g., `http://export_user:password@clickhouse:8123`) to enforce server-side resource limits. |
+
+When set, all 4 export functions (traces, observations, scores, events) route through this URL. Without it, exports use the default `CLICKHOUSE_URL`.
+
+To set up server-side ClickHouse user profiles, mount `docs/clickhouse-users.xml` into your ClickHouse container at `/etc/clickhouse-server/users.d/custom-users.xml`. This creates three users with server-enforced resource caps:
+
+| User | Profile | max_memory_usage | priority | Use case |
+|---|---|---|---|---|
+| `interactive_user` | interactive | 16 GiB | 0 (highest) | Web UI + API queries |
+| `export_user` | export | 32 GiB | 2 (lowest) | Blob storage export |
+| `ingestion_user` | ingestion | 8 GiB | 1 | Data ingestion |
+
 ### ClickHouse Export Resource Limits
 
-These env vars control how much ClickHouse resource each export query can use. Set them on the **shared** package (they're read by the export functions in `packages/shared`):
+These env vars control client-side resource limits per export query. They apply regardless of whether `CLICKHOUSE_EXPORT_URL` is set:
 
 | Env var | Default | Type | Effect |
 |---|---|---|---|
@@ -66,6 +85,8 @@ These env vars control how much ClickHouse resource each export query can use. S
 | `LANGFUSE_CLICKHOUSE_DATA_EXPORT_MAX_THREADS` | `10` | number | Max CPU threads per export query. |
 | `LANGFUSE_CLICKHOUSE_DATA_EXPORT_PRIORITY` | `2` | number | Query priority (0 = highest). UI/ingestion queries at default priority (0) preempt exports. |
 | `LANGFUSE_CLICKHOUSE_DATA_EXPORT_REQUEST_TIMEOUT_MS` | `600000` (10 min) | number | HTTP request timeout for export queries. |
+
+When both client-side and server-side limits are set, the **stricter** limit wins (ClickHouse takes the minimum).
 
 ### Export Chunking
 
@@ -245,13 +266,9 @@ LIMIT 10;
 
 These are not implemented but recommended based on operational experience:
 
-### ClickHouse Server Profiles (P1)
-
-Create dedicated ClickHouse users with server-enforced resource limits (via `users.xml`). This provides defense-in-depth: any query that misses client-side settings still hits the server cap. See `plans/p1-clickhouse-server-profiles.md` for the full configuration.
-
 ### ClickHouse Read Replica for Exports
 
-Route export queries to a dedicated ClickHouse replica. This provides complete resource isolation at the database level — export can never affect UI or ingestion performance. This is the ultimate isolation but requires infrastructure changes (replica setup, replication lag handling).
+Route export queries to a dedicated ClickHouse replica. This provides complete resource isolation at the database level — export can never affect UI or ingestion performance. This is the ultimate isolation but requires infrastructure changes (replica setup, replication lag handling). The `CLICKHOUSE_EXPORT_URL` routing is already in place, so this would only require pointing it to the replica.
 
 ### Export Progress API
 

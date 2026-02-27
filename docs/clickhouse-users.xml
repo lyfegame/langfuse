@@ -1,0 +1,73 @@
+<!--
+  ClickHouse server-side user profiles for workload isolation.
+
+  Mount this file into your ClickHouse container/pod at:
+    /etc/clickhouse-server/users.d/custom-users.xml
+
+  Each user has a server-enforced profile that caps resources independently
+  of any client-side settings. This is defense-in-depth: even if a query
+  misses client-side max_memory_usage, the server profile enforces it.
+
+  To use these users, set CLICKHOUSE_EXPORT_URL in the export worker pod:
+    CLICKHOUSE_EXPORT_URL=http://export_user:<password>@clickhouse:8123
+
+  For full deployment instructions, see docs/fork-operations.md.
+-->
+<clickhouse>
+  <profiles>
+    <!-- Interactive: default for web UI + API queries -->
+    <interactive>
+      <max_threads>32</max_threads>
+      <max_memory_usage>16000000000</max_memory_usage>  <!-- 16 GiB -->
+      <max_execution_time>30</max_execution_time>       <!-- 30s timeout -->
+      <priority>0</priority>                             <!-- highest priority -->
+    </interactive>
+
+    <!-- Export: bounded resources, lower priority -->
+    <export>
+      <max_threads>10</max_threads>
+      <max_memory_usage>32000000000</max_memory_usage>  <!-- 32 GiB hard cap -->
+      <max_execution_time>600</max_execution_time>      <!-- 10 min timeout -->
+      <priority>2</priority>                             <!-- lower priority -->
+    </export>
+
+    <!-- Ingestion: write-focused, minimal read resources -->
+    <ingestion>
+      <max_threads>8</max_threads>
+      <max_memory_usage>8000000000</max_memory_usage>   <!-- 8 GiB -->
+      <max_execution_time>60</max_execution_time>
+      <priority>1</priority>
+    </ingestion>
+  </profiles>
+
+  <users>
+    <!-- Replace password_sha256_hex values with actual hashes.
+         Generate with: echo -n 'your-password' | sha256sum | head -c 64 -->
+    <interactive_user>
+      <password_sha256_hex>REPLACE_WITH_SHA256_HEX</password_sha256_hex>
+      <profile>interactive</profile>
+      <networks><ip>::/0</ip></networks>
+      <databases>
+        <database>default</database>
+      </databases>
+    </interactive_user>
+
+    <export_user>
+      <password_sha256_hex>REPLACE_WITH_SHA256_HEX</password_sha256_hex>
+      <profile>export</profile>
+      <networks><ip>::/0</ip></networks>
+      <databases>
+        <database>default</database>
+      </databases>
+    </export_user>
+
+    <ingestion_user>
+      <password_sha256_hex>REPLACE_WITH_SHA256_HEX</password_sha256_hex>
+      <profile>ingestion</profile>
+      <networks><ip>::/0</ip></networks>
+      <databases>
+        <database>default</database>
+      </databases>
+    </ingestion_user>
+  </users>
+</clickhouse>

@@ -1429,6 +1429,7 @@ export const getTracesForBlobStorageExportParquet = function (
       max_threads: env.LANGFUSE_CLICKHOUSE_DATA_EXPORT_MAX_THREADS,
       priority: String(env.LANGFUSE_CLICKHOUSE_DATA_EXPORT_PRIORITY),
     },
+    preferredClickhouseService: "Export",
   });
 };
 

@@ -15,7 +15,34 @@ on:
         required: true
 
 jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
+          cache: "pnpm"
+
+      - name: Install deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Generate Prisma Client
+        run: pnpm turbo db:generate
+
+      - name: Build and type-check
+        run: pnpm turbo build typecheck
+        env:
+          SKIP_ENV_VALIDATION: true
+
   build-web:
+    needs: validate
     runs-on: ubuntu-latest
     permissions:
       packages: write
@@ -55,6 +82,7 @@ jobs:
             NEXT_PUBLIC_BUILD_ID=${{ github.sha }}
 
   build-worker:
+    needs: validate
     runs-on: ubuntu-latest
     permissions:
       packages: write

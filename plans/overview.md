@@ -24,23 +24,24 @@ These workloads compete for shared ClickHouse resources. Without isolation, expo
                          ClickHouse
 ```
 
-Three layers of isolation ensure workloads don't interfere:
+Four layers of isolation ensure workloads don't interfere:
 
 | Layer | Mechanism | Status |
 |---|---|---|
 | **Process isolation** | `LANGFUSE_WORKER_ROLE` separates export/ingestion into dedicated pods | Done |
 | **Query isolation** | `max_memory_usage`, `max_threads`, `priority` per export query | Done |
 | **Query size bounding** | Adaptive window splitting — always splits on error, never gets stuck | Done |
+| **Service routing** | `CLICKHOUSE_EXPORT_URL` routes exports to a dedicated ClickHouse user with server-enforced profiles | Done |
 
 ## Plan Status
 
 | Plan | Status | Rationale |
 |---|---|---|
 | **P0**: Worker isolation + query limits | **Done** | Worker roles, max_threads, priority, max_memory_usage, adaptive splitting |
-| **P1**: ClickHouse server profiles | **Recommended (not code)** | Server-enforced user profiles add another isolation layer. Infrastructure config only. |
+| **P1**: ClickHouse server profiles | **Done** | Export service routing + users.xml template. Deploy users.xml to enforce server-side limits. |
 | **P2**: Export materialized view | **Dropped** | Doubles observation storage (~2+ TiB), adds write amplification, schema drift risk. `LIMIT 1 BY` + adaptive splitting already solves the problem. |
 | **P3**: ClickHouse projections | **Dropped** | Doubles storage per table. Only worth it if UI latency is a proven problem — profile first. |
-| **P4**: Observability | **Partially done, rest recommended** | Structured logs + OTel histograms done. Further metrics and dashboards are incremental. |
+| **P4**: Observability | **Done** | All logs structured, OTel histograms for export timing. Dashboards/alerting are ops tasks. |
 | **P5**: CI pipeline + fork hygiene | **Done** | CI activated on main. |
 
 ## Key Decisions
@@ -65,13 +66,11 @@ Projections pre-sort data for UI query patterns (session view, trace detail). Ho
 
 **Recommendation:** Profile UI queries first. If latency is a problem, add projections for the specific patterns that need it.
 
-### Why P1 (Server Profiles) is recommended but not implemented
+### P1 (Server Profiles) — what's done vs. what's deployment config
 
-Server-side ClickHouse user profiles (users.xml) enforce resource limits at the ClickHouse server level, independent of client-side settings. This is valuable defense-in-depth:
-- Any query that misses client-side settings still hits the server cap
-- Server-enforced `max_memory_usage` prevents OOM even from ad-hoc queries
+The code changes are done: `"Export"` service type in `PreferredClickhouseService`, `CLICKHOUSE_EXPORT_URL` env var, routing in `getClickhouseUrl()`, and all 4 export functions pass `preferredClickhouseService: "Export"`.
 
-But this requires ClickHouse server configuration changes (mounting users.xml), not code changes in the Langfuse application.
+What remains is deployment config: mount `docs/clickhouse-users.xml` into ClickHouse and set `CLICKHOUSE_EXPORT_URL` pointing to the export user. This is defense-in-depth — server-enforced `max_memory_usage` prevents OOM even from ad-hoc queries.
 
 ## Reference
 

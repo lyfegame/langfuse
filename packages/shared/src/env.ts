@@ -57,6 +57,7 @@ const EnvSchema = z.object({
   CLICKHOUSE_URL: z.string().url(),
   CLICKHOUSE_READ_ONLY_URL: z.string().url().optional(),
   CLICKHOUSE_EVENTS_READ_ONLY_URL: z.string().url().optional(),
+  CLICKHOUSE_EXPORT_URL: z.string().url().optional(),
   CLICKHOUSE_CLUSTER_NAME: z.string().default("default"),
   CLICKHOUSE_DB: z.string().default("default"),
   CLICKHOUSE_USER: z.string(),
