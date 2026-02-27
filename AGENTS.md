@@ -16,3 +16,6 @@ Langfuse is an **open source LLM engineering** platform for developing, monitori
 
 ## Commits
 - Follow [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/) when crafting commit messages.
+
+## Pull Requests
+- This is a fork (`lyfegame/langfuse`). Always create PRs against this fork's `main` branch using `--repo lyfegame/langfuse --base main`. Never create PRs against the upstream `langfuse/langfuse` repo.

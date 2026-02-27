@@ -250,6 +250,16 @@ const EnvSchema = z.object({
     .int()
     .positive()
     .default(600_000), // 10 minutes
+  LANGFUSE_CLICKHOUSE_DATA_EXPORT_MAX_THREADS: z.coerce
+    .number()
+    .int()
+    .nonnegative()
+    .default(10),
+  LANGFUSE_CLICKHOUSE_DATA_EXPORT_PRIORITY: z.coerce
+    .number()
+    .int()
+    .nonnegative()
+    .default(2),
 
   LANGFUSE_EVENT_PROPAGATION_WORKER_GLOBAL_CONCURRENCY: z.coerce
     .number()
