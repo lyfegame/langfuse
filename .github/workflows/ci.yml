@@ -12,18 +12,11 @@ env:
 
 jobs:
   build-lint-typecheck:
-    env:
-      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
-      SHADOW_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
-      DIRECT_URL: postgresql://postgres:postgres@localhost:5432/postgres
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
-
-      - name: Start containers
-        run: docker compose -f "docker-compose.yml" up -d --build
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
@@ -36,9 +29,6 @@ jobs:
 
       - name: Install deps
         run: pnpm install --frozen-lockfile
-
-      - name: Deploy db
-        run: pnpm turbo db:deploy
 
       - name: Generate Prisma Client
         run: pnpm turbo db:generate
