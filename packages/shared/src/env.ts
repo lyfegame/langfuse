@@ -266,6 +266,15 @@ const EnvSchema = z.object({
   LANGFUSE_CLICKHOUSE_DATA_EXPORT_MAX_MEMORY_USAGE: z
     .string()
     .default("20000000000"), // 20 GiB — string because ClickHouse UInt64 settings are string-typed
+  // Parquet row group size for export queries. Smaller values avoid Parquet's 2 GiB
+  // per-column-chunk limit but produce more row groups (worse read performance).
+  // 500 is safe for observations with large input/output fields (~430 KB avg).
+  // Increase to 5000–10000 if your data has smaller payloads.
+  LANGFUSE_CLICKHOUSE_DATA_EXPORT_PARQUET_ROW_GROUP_SIZE: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(500),
 
   LANGFUSE_EVENT_PROPAGATION_WORKER_GLOBAL_CONCURRENCY: z.coerce
     .number()
