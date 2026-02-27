@@ -1,7 +1,7 @@
 # P1: ClickHouse Server-Side User Profiles
 
-**Status**: Not started
-**Type**: Deployment configuration (no code changes)
+**Status**: Done (code routing) — server-side users.xml is deployment config
+**Type**: Code change (Export service type routing) + deployment configuration (users.xml)
 **Impact**: Hard memory cap prevents the #1 firefight trigger (132 GiB OOM)
 
 ## Problem

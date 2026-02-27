@@ -17,6 +17,7 @@ import {
   queryClickhouse,
   QueueJobs,
   recordHistogram,
+  ClickHouseResourceError,
 } from "@langfuse/shared/src/server";
 import {
   BlobStorageIntegrationType,
@@ -69,29 +70,38 @@ const getMinTimestampForExport = async (
         });
 
         // Extract the minimum timestamp
-        logger.info(
-          `[BLOB INTEGRATION] ClickHouse min_timestamp for project ${projectId}: ${result[0]?.min_timestamp}, type: ${typeof result[0]?.min_timestamp}`,
-        );
+        logger.info({
+          message: "[BLOB INTEGRATION] ClickHouse min_timestamp query result",
+          projectId,
+          minTimestamp: result[0]?.min_timestamp,
+          type: typeof result[0]?.min_timestamp,
+        });
         const minTimestampValue = Number(result[0]?.min_timestamp);
 
         if (minTimestampValue && minTimestampValue > 0) {
           const date = new Date(minTimestampValue);
-          logger.info(
-            `[BLOB INTEGRATION] Created Date from min_timestamp for project ${projectId}: ${date}, isValid: ${!isNaN(date.getTime())}, getTime: ${date.getTime()}`,
-          );
+          logger.info({
+            message: "[BLOB INTEGRATION] Resolved min_timestamp for export",
+            projectId,
+            date: date.toISOString(),
+            epochMs: date.getTime(),
+          });
           return date;
         }
 
         // If no data exists, use current time as a fallback
-        logger.info(
-          `[BLOB INTEGRATION] No historical data found for project ${projectId}, using current time`,
-        );
+        logger.info({
+          message: "[BLOB INTEGRATION] No historical data found, using epoch",
+          projectId,
+        });
         return new Date(0);
       } catch (error) {
-        logger.error(
-          `[BLOB INTEGRATION] Error querying ClickHouse for minimum timestamp for project ${projectId}`,
+        logger.error({
+          message:
+            "[BLOB INTEGRATION] Error querying ClickHouse for minimum timestamp",
+          projectId,
           error,
-        );
+        });
         throw new Error(`Failed to fetch minimum timestamp: ${error}`);
       }
     case BlobStorageExportMode.FROM_TODAY:
@@ -145,6 +155,11 @@ const getFileTypeProperties = (fileType: BlobStorageIntegrationFileType) => {
   }
 };
 
+// Minimum time window for adaptive splitting on memory errors.
+// If a chunk still exceeds ClickHouse max_memory_usage at this size,
+// the error propagates to BullMQ for retry with backoff.
+const MIN_EXPORT_WINDOW_MS = 60_000; // 1 minute
+
 const processBlobStorageExport = async (config: {
   projectId: string;
   minTimestamp: Date;
@@ -162,9 +177,13 @@ const processBlobStorageExport = async (config: {
 }) => {
   const exportStartTime = Date.now();
 
-  logger.info(
-    `[BLOB INTEGRATION] Processing ${config.table} export for project ${config.projectId}`,
-  );
+  logger.info({
+    message: "[BLOB INTEGRATION] Processing table export",
+    table: config.table,
+    projectId: config.projectId,
+    windowStart: config.minTimestamp.toISOString(),
+    windowEnd: config.maxTimestamp.toISOString(),
+  });
 
   // Initialize the storage service
   // KMS SSE is not supported for this integration.
@@ -233,10 +252,12 @@ const processBlobStorageExport = async (config: {
         streamTransformations[config.fileType](),
         (err) => {
           if (err) {
-            logger.error(
-              "[BLOB INTEGRATION] Getting data from DB for blob storage integration failed: ",
-              err,
-            );
+            logger.error({
+              message: "[BLOB INTEGRATION] Stream pipeline failed",
+              table: config.table,
+              projectId: config.projectId,
+              error: err,
+            });
           }
         },
       );
@@ -261,16 +282,70 @@ const processBlobStorageExport = async (config: {
     recordHistogram("langfuse.blob_export.table_duration_ms", durationMs, {
       table: config.table,
     });
-  } catch (error) {
+  } catch (rawError) {
+    // Adaptive window splitting: on ANY error, split the time window in half and
+    // retry each half if the window is large enough. This ensures export always
+    // makes forward progress instead of getting permanently stuck on an oversized
+    // chunk. Being stuck is always worse than producing extra (smaller) files —
+    // each half covers a disjoint time range, and deterministic filenames mean
+    // retries overwrite.
+    //
+    // Error classification is used for observability only, not for the split decision.
+    // This handles all failure modes: ClickHouse memory limits, timeouts, overcommit,
+    // mid-stream "socket hang up" (where error text is lost), and transient errors.
+    const windowMs =
+      config.maxTimestamp.getTime() - config.minTimestamp.getTime();
+
+    if (windowMs > MIN_EXPORT_WINDOW_MS) {
+      const midpoint = new Date(
+        config.minTimestamp.getTime() + Math.floor(windowMs / 2),
+      );
+
+      // Classify error for observability (not for control flow)
+      const classified =
+        rawError instanceof ClickHouseResourceError
+          ? rawError
+          : rawError instanceof Error
+            ? ClickHouseResourceError.wrapIfResourceError(rawError)
+            : rawError;
+      const errorType =
+        classified instanceof ClickHouseResourceError
+          ? classified.errorType
+          : "unknown";
+
+      logger.warn({
+        message: "blob_export_error_splitting",
+        table: config.table,
+        projectId: config.projectId,
+        errorType,
+        errorMessage:
+          rawError instanceof Error ? rawError.message : String(rawError),
+        originalWindowMs: windowMs,
+        splitWindowMs: Math.floor(windowMs / 2),
+        minTimestamp: config.minTimestamp.toISOString(),
+        maxTimestamp: config.maxTimestamp.toISOString(),
+      });
+      recordHistogram("langfuse.blob_export.split_count", 1, {
+        table: config.table,
+        errorType,
+      });
+
+      await processBlobStorageExport({ ...config, maxTimestamp: midpoint });
+      await processBlobStorageExport({ ...config, minTimestamp: midpoint });
+      return;
+    }
+
+    // Window at minimum (≤60s) — can't split further.
+    // Let the error propagate to BullMQ for retry with backoff.
     const durationMs = Date.now() - exportStartTime;
     logger.error({
       message: `[BLOB INTEGRATION] Error exporting ${config.table} for project ${config.projectId}`,
       table: config.table,
       projectId: config.projectId,
       durationMs,
-      error,
+      error: rawError,
     });
-    throw error;
+    throw rawError;
   }
 };
 
@@ -285,9 +360,10 @@ export const handleBlobStorageIntegrationProjectJob = async (
     span.setAttribute("messaging.bullmq.job.input.projectId", projectId);
   }
 
-  logger.info(
-    `[BLOB INTEGRATION] Processing blob storage integration for project ${projectId}`,
-  );
+  logger.info({
+    message: "[BLOB INTEGRATION] Processing blob storage integration job",
+    projectId,
+  });
 
   const blobStorageIntegration = await prisma.blobStorageIntegration.findUnique(
     {
@@ -298,15 +374,17 @@ export const handleBlobStorageIntegrationProjectJob = async (
   );
 
   if (!blobStorageIntegration) {
-    logger.warn(
-      `[BLOB INTEGRATION] Blob storage integration not found for project ${projectId}`,
-    );
+    logger.warn({
+      message: "[BLOB INTEGRATION] Integration not found",
+      projectId,
+    });
     return;
   }
   if (!blobStorageIntegration.enabled) {
-    logger.info(
-      `[BLOB INTEGRATION] Blob storage integration is disabled for project ${projectId}`,
-    );
+    logger.info({
+      message: "[BLOB INTEGRATION] Integration is disabled",
+      projectId,
+    });
     return;
   }
 
@@ -319,9 +397,15 @@ export const handleBlobStorageIntegrationProjectJob = async (
     blobStorageIntegration.exportStartDate,
   );
 
-  logger.info(
-    `[BLOB INTEGRATION] Calculated minTimestamp for project ${projectId}: ${minTimestamp}, isValid: ${!isNaN(minTimestamp.getTime())}, getTime: ${minTimestamp.getTime()}, exportMode: ${blobStorageIntegration.exportMode}, lastSyncAt: ${blobStorageIntegration.lastSyncAt}, exportStartDate: ${blobStorageIntegration.exportStartDate}`,
-  );
+  logger.info({
+    message: "[BLOB INTEGRATION] Calculated minTimestamp",
+    projectId,
+    minTimestamp: minTimestamp.toISOString(),
+    exportMode: blobStorageIntegration.exportMode,
+    lastSyncAt: blobStorageIntegration.lastSyncAt?.toISOString() ?? null,
+    exportStartDate:
+      blobStorageIntegration.exportStartDate?.toISOString() ?? null,
+  });
 
   const now = new Date();
   const uncappedMaxTimestamp = new Date(now.getTime() - 30 * 60 * 1000); // 30-minute lag buffer
@@ -343,9 +427,14 @@ export const handleBlobStorageIntegrationProjectJob = async (
     : frequencyIntervalMs;
 
   if (isCatchingUp) {
-    logger.info(
-      `[BLOB INTEGRATION] Catch-up mode for project ${projectId}: using ${chunkIntervalMs / 1000}s chunks (lag: ${Math.round((uncappedMaxTimestamp.getTime() - minTimestamp.getTime()) / 3600000)}h)`,
-    );
+    logger.info({
+      message: "[BLOB INTEGRATION] Catch-up mode active",
+      projectId,
+      chunkIntervalSec: chunkIntervalMs / 1000,
+      lagHours: Math.round(
+        (uncappedMaxTimestamp.getTime() - minTimestamp.getTime()) / 3600000,
+      ),
+    });
   }
 
   // Cap maxTimestamp to one chunk ahead of minTimestamp
@@ -357,19 +446,27 @@ export const handleBlobStorageIntegrationProjectJob = async (
     ),
   );
 
-  logger.info(
-    `[BLOB INTEGRATION] Calculated maxTimestamp for project ${projectId}: ${maxTimestamp}, isValid: ${!isNaN(maxTimestamp.getTime())}, getTime: ${maxTimestamp.getTime()}, frequencyIntervalMs: ${frequencyIntervalMs}`,
-  );
+  logger.info({
+    message: "[BLOB INTEGRATION] Calculated maxTimestamp",
+    projectId,
+    maxTimestamp: maxTimestamp.toISOString(),
+    frequencyIntervalMs,
+  });
 
   // Skip export if the time window is empty or invalid
   if (minTimestamp >= maxTimestamp) {
-    logger.info(
-      `[BLOB INTEGRATION] Skipping export for project ${projectId}: time window is empty (min: ${minTimestamp.toISOString()}, max: ${maxTimestamp.toISOString()})`,
-    );
+    logger.info({
+      message: "[BLOB INTEGRATION] Skipping export, time window is empty",
+      projectId,
+      minTimestamp: minTimestamp.toISOString(),
+      maxTimestamp: maxTimestamp.toISOString(),
+    });
     return;
   }
 
   try {
+    const jobStartMs = Date.now();
+
     // Process the export based on the integration configuration
     const executionConfig = {
       projectId,
@@ -394,12 +491,16 @@ export const handleBlobStorageIntegrationProjectJob = async (
         projectId,
       );
 
+    let tablesExportedCount = 0;
+
     if (isTraceOnlyProject) {
       // Only process traces table for projects in the trace-only list (legacy behavior)
-      logger.info(
-        `[BLOB INTEGRATION] Project ${projectId} is configured for trace-only export via env var, skipping observations, scores, and events`,
-      );
+      logger.info({
+        message: "[BLOB INTEGRATION] Trace-only export mode (env var override)",
+        projectId,
+      });
       await processBlobStorageExport({ ...executionConfig, table: "traces" });
+      tablesExportedCount = 1;
     } else {
       // Process tables sequentially to reduce peak memory and ClickHouse load.
       // Parallel exports (Promise.all) caused ~4x concurrent memory pressure and
@@ -444,7 +545,18 @@ export const handleBlobStorageIntegrationProjectJob = async (
       for (const task of exportTasks) {
         await task();
       }
+      tablesExportedCount = exportTasks.length;
     }
+
+    logger.info({
+      message: "blob_export_job_completed",
+      projectId,
+      durationMs: Date.now() - jobStartMs,
+      isCatchingUp,
+      windowStart: minTimestamp.toISOString(),
+      windowEnd: maxTimestamp.toISOString(),
+      tablesExported: tablesExportedCount,
+    });
 
     // Determine if we've caught up with present-day data
     const caughtUp = maxTimestamp.getTime() >= uncappedMaxTimestamp.getTime();
@@ -453,15 +565,19 @@ export const handleBlobStorageIntegrationProjectJob = async (
     if (caughtUp) {
       // Normal mode: schedule for the next frequency period
       nextSyncAt = new Date(maxTimestamp.getTime() + frequencyIntervalMs);
-      logger.info(
-        `[BLOB INTEGRATION] Caught up with exports for project ${projectId}. Next sync at ${nextSyncAt.toISOString()}`,
-      );
+      logger.info({
+        message: "[BLOB INTEGRATION] Caught up with exports",
+        projectId,
+        nextSyncAt: nextSyncAt.toISOString(),
+      });
     } else {
       // Catch-up mode: schedule next chunk immediately
       nextSyncAt = new Date();
-      logger.info(
-        `[BLOB INTEGRATION] Still catching up for project ${projectId}. Scheduling next chunk immediately (processed up to ${maxTimestamp.toISOString()})`,
-      );
+      logger.info({
+        message: "[BLOB INTEGRATION] Still catching up, scheduling next chunk",
+        projectId,
+        processedUpTo: maxTimestamp.toISOString(),
+      });
     }
 
     // Update integration after successful processing
@@ -490,15 +606,18 @@ export const handleBlobStorageIntegrationProjectJob = async (
           },
           { jobId },
         );
-        logger.info(
-          `[BLOB INTEGRATION] Queued next catch-up chunk for project ${projectId} with jobId ${jobId}`,
-        );
+        logger.info({
+          message: "[BLOB INTEGRATION] Queued next catch-up chunk",
+          projectId,
+          jobId,
+        });
       }
     }
 
     const jobDurationMs = Date.now() - now.getTime();
     logger.info({
-      message: `[BLOB INTEGRATION] Successfully processed blob storage integration for project ${projectId}`,
+      message:
+        "[BLOB INTEGRATION] Successfully processed blob storage integration",
       projectId,
       windowStart: minTimestamp.toISOString(),
       windowEnd: maxTimestamp.toISOString(),

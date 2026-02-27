@@ -1,4 +1,4 @@
-import { Readable } from "stream";
+import { PassThrough, Readable } from "stream";
 import { env } from "../../env";
 import {
   clickhouseClient,
@@ -346,9 +346,17 @@ export async function queryClickhouseParquetStream(opts: {
 
     span.setAttribute("ch.queryId", result.query_id);
 
-    // The exec() stream from @clickhouse/client-node is a Node.js Readable
-    // (HTTP IncomingMessage), safe to cast for StorageService.uploadFile
-    return result.stream as Readable;
+    // Wrap the raw HTTP stream in a PassThrough that reclassifies ClickHouse
+    // resource errors (memory limit, overcommit, timeout) emitted mid-stream.
+    // Without this, errors from ClickHouse are raw when consumed downstream.
+    // Mirrors queryClickhouseStream's error wrapping at line ~298.
+    const raw = result.stream as Readable;
+    const wrapped = new PassThrough();
+    raw.on("error", (err: Error) => {
+      wrapped.destroy(ClickHouseResourceError.wrapIfResourceError(err));
+    });
+    raw.pipe(wrapped);
+    return wrapped;
   } catch (error) {
     throw ClickHouseResourceError.wrapIfResourceError(error as Error);
   } finally {

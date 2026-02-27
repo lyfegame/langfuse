@@ -10,68 +10,68 @@ The Langfuse fork (`lyfegame/langfuse`) serves as the data aggregation backbone 
 
 These workloads compete for shared ClickHouse resources. Without isolation, export starves ingestion, which cascades into web pod 502s.
 
-## Firefight History (Feb 25-26, 2026)
-
-~40 reactive commits across 2 days:
-
-| Area | Iterations | What happened |
-|---|---|---|
-| ClickHouse memory | 6 | 12Gi → 200Gi (broke Autopilot!) → 64Gi → 96Gi → 160Gi |
-| Web pods | 3 | Crash-loop 502s → CPU bumps → probe tuning |
-| Export | 5 | OOM at 132 GiB → fork with LIMIT 1 BY + Parquet → row group limits |
-| KEDA | 2 | Workers killed mid-export → cooldown 5min → 30min |
-| PVC | 1 | 1TiB → 2TiB after disk-full |
-| Data loss | 1 | ClickHouse migration never executed during GKE cutover → 4 days lost |
-
-**Root cause**: All three workloads share a single ClickHouse instance with no resource isolation at any layer.
-
 ## Architecture
 
 ```
-┌─────────────┐     ┌──────────────┐     ┌─────────────────────┐
-│  Langfuse   │     │   Worker     │     │    ClickHouse       │
-│  Web (UI)   │────▶│  (BullMQ)    │────▶│  (single instance)  │
-│  + API      │     │              │     │                     │
-└──────┬──────┘     └──────┬───────┘     └─────────────────────┘
-       │                   │                       ▲
-       │            ┌──────┴───────┐               │
-       │            │  Export pods │───────────────┘
-       │            │  (KEDA)     │  ← Full table scans
-       │            └─────────────┘
-       │
-       └──── Active queries (interactive, latency-sensitive)
+┌─────────────┐     ┌──────────────────┐     ┌──────────────────┐
+│  Web (Next.js)│     │ Worker: ingestion │     │ Worker: export   │
+│  UI queries   │     │ BullMQ jobs      │     │ Blob storage only│
+│  tRPC/API     │     │ Evals, deletions │     │                  │
+└──────┬────────┘     └────────┬─────────┘     └────────┬─────────┘
+       │                       │                        │
+       └───────────────────────┴────────────────────────┘
+                               │
+                         ClickHouse
 ```
 
-The cascading failure:
-1. Export query scans entire table → eats all ClickHouse threads + memory
-2. Ingestion async inserts queue up → BullMQ backs up
-3. Web queries timeout → 502s
-4. KEDA kills export worker mid-query → wasted work → retry → repeat
+Four layers of isolation ensure workloads don't interfere:
 
-## Workload Profiles
+| Layer | Mechanism | Status |
+|---|---|---|
+| **Process isolation** | `LANGFUSE_WORKER_ROLE` separates export/ingestion into dedicated pods | Done |
+| **Query isolation** | `max_memory_usage`, `max_threads`, `priority` per export query | Done |
+| **Query size bounding** | Adaptive window splitting — always splits on error, never gets stuck | Done |
+| **Service routing** | `CLICKHOUSE_EXPORT_URL` routes exports to a dedicated ClickHouse user with server-enforced profiles | Done |
 
-| Workload | Pattern | Latency | CH pressure | Isolation need |
-|---|---|---|---|---|
-| Bulk Export | Sequential full-table scans | Hours OK | Very high (memory + CPU) | Must be capped |
-| Ingestion | High-throughput async inserts | Seconds | Medium (write buffering) | Must not be starved |
-| Active Queries | Interactive filtered reads | < 2s | Low-medium (indexed) | Must stay responsive |
+## Plan Status
 
-## Fork State
+| Plan | Status | Rationale |
+|---|---|---|
+| **P0**: Worker isolation + query limits | **Done** | Worker roles, max_threads, priority, max_memory_usage, adaptive splitting |
+| **P1**: ClickHouse server profiles | **Done** | Export service routing + users.xml template. Deploy users.xml to enforce server-side limits. |
+| **P2**: Export materialized view | **Dropped** | Doubles observation storage (~2+ TiB), adds write amplification, schema drift risk. `LIMIT 1 BY` + adaptive splitting already solves the problem. |
+| **P3**: ClickHouse projections | **Dropped** | Doubles storage per table. Only worth it if UI latency is a proven problem — profile first. |
+| **P4**: Observability | **Done** | All logs structured, OTel histograms for export timing. Dashboards/alerting are ops tasks. |
+| **P5**: CI pipeline + fork hygiene | **Done** | CI activated on main. |
 
-The fork (`lyfegame/langfuse`, branch `main`) contains:
-- 7 modified files, +318/-66 lines from upstream
-- Fixes for export OOM (LIMIT 1 BY, Parquet stream, row group limits)
-- Worker role system and query resource limits (PR #2)
+## Key Decisions
 
-## Execution Order
+### Why P2 (Export MV) was dropped
 
-```
-P0  Worker isolation + query limits          ← PR #2 (immediate)
-P1  ClickHouse server profiles               ← Deployment config (next deploy)
-P2  Export materialized view                  ← Code change (reduces export memory 50%)
-P3  ClickHouse projections                   ← Migration (speeds UI queries)
-P4  Observability improvements               ← Ongoing
-P5  CI pipeline + fork hygiene               ← One-time setup
-```
+The MV was designed to avoid `LIMIT 1 BY` dedup at query time, reducing export memory by ~50%. However:
+- `LIMIT 1 BY` is already proven and working
+- Adaptive splitting handles oversized chunks automatically
+- MV doubles observation storage (already at 2 TiB PVC)
+- Write amplification for every insert
+- Schema drift: MV must be kept in sync with base table on every column change
 
-Observability (P4) is listed after schema changes but should be done incrementally alongside each phase to validate impact.
+The cost far outweighs the benefit now that adaptive splitting ensures forward progress.
+
+### Why P3 (Projections) was dropped
+
+Projections pre-sort data for UI query patterns (session view, trace detail). However:
+- Each `SELECT *` projection roughly doubles table storage
+- Write amplification for every insert (~2x total with 3 projections)
+- No evidence UI query latency is a problem yet
+
+**Recommendation:** Profile UI queries first. If latency is a problem, add projections for the specific patterns that need it.
+
+### P1 (Server Profiles) — what's done vs. what's deployment config
+
+The code changes are done: `"Export"` service type in `PreferredClickhouseService`, `CLICKHOUSE_EXPORT_URL` env var, routing in `getClickhouseUrl()`, and all 4 export functions pass `preferredClickhouseService: "Export"`.
+
+What remains is deployment config: mount `docs/clickhouse-users.xml` into ClickHouse and set `CLICKHOUSE_EXPORT_URL` pointing to the export user. This is defense-in-depth — server-enforced `max_memory_usage` prevents OOM even from ad-hoc queries.
+
+## Reference
+
+See `docs/` for the operational guide on deploying and operating the fork for all three workloads.

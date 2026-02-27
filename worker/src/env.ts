@@ -2,6 +2,12 @@ import { removeEmptyEnvVariables } from "@langfuse/shared";
 import { z } from "zod/v4";
 
 const EnvSchema = z.object({
+  // Worker role: controls which queue groups this worker instance processes.
+  // "all" (default) = backward compatible, processes everything.
+  // "ingestion" = ingestion pipelines, evals, deletions, background jobs.
+  // "export" = blob storage export only.
+  LANGFUSE_WORKER_ROLE: z.enum(["all", "ingestion", "export"]).default("all"),
+
   BUILD_ID: z.string().optional(),
   NODE_ENV: z
     .enum(["development", "test", "production"])
@@ -168,11 +174,6 @@ const EnvSchema = z.object({
     .int()
     .nonnegative()
     .default(15 * 60 * 1000), // 15 minutes
-
-  // Worker role for workload isolation. "all" runs every queue (default),
-  // "ingestion" runs all queues except blob storage export,
-  // "export" runs only blob storage export queues.
-  LANGFUSE_WORKER_ROLE: z.enum(["all", "ingestion", "export"]).default("all"),
 
   // Flags to toggle queue consumers on or off.
   QUEUE_CONSUMER_CLOUD_USAGE_METERING_QUEUE_IS_ENABLED: z

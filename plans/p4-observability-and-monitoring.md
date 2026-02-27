@@ -1,6 +1,6 @@
 # P4: Observability and Monitoring
 
-**Status**: Partially started (P0 added basic structured logs + OTel histograms)
+**Status**: Done (P4a structured logging complete, P4b-d are incremental/ops)
 **Type**: Incremental code changes + dashboard setup
 **Impact**: Detect issues before they become firefights
 
