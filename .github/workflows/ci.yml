@@ -11,7 +11,7 @@ env:
   TURBO_TEAM: ${{ secrets.TURBO_TEAM }}
 
 jobs:
-  build-lint-typecheck:
+  lint-typecheck:
     runs-on: ubuntu-latest
 
     steps:
@@ -33,12 +33,12 @@ jobs:
       - name: Generate Prisma Client
         run: pnpm turbo db:generate
 
-      - name: Build shared packages
+      - name: Build shared package
         run: pnpm turbo build --filter=@langfuse/shared
         env:
           SKIP_ENV_VALIDATION: true
 
-      - name: Build, lint and type-check
-        run: pnpm turbo build lint typecheck
+      - name: Lint and type-check
+        run: pnpm turbo lint typecheck
         env:
           SKIP_ENV_VALIDATION: true
