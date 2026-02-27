@@ -36,8 +36,8 @@ jobs:
       - name: Generate Prisma Client
         run: pnpm turbo db:generate
 
-      - name: Build
-        run: pnpm turbo build
+      - name: Build shared package
+        run: pnpm turbo build --filter=@langfuse/shared
         env:
           SKIP_ENV_VALIDATION: true
 
