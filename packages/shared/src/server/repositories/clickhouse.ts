@@ -337,7 +337,7 @@ export async function queryClickhouseParquetStream(opts: {
         // Buffer full query result before streaming response body so ClickHouse
         // returns query errors as HTTP errors instead of partial output streams.
         // This is a key safeguard for export cursor correctness.
-        wait_end_of_query: "1",
+        wait_end_of_query: 1,
         output_format_parquet_compression_method: "zstd",
         // Limit row group size to prevent Parquet's 2 GiB per-column-chunk limit.
         // Observations with large input/output fields can exceed 2 GiB in a single
