@@ -37,6 +37,7 @@ vi.mock("../../env", () => ({
   env: {
     LANGFUSE_BLOB_STORAGE_EXPORT_CATCHUP_INTERVAL_MS: 0,
     LANGFUSE_BLOB_STORAGE_EXPORT_TRACE_ONLY_PROJECT_IDS: ["project-1"],
+    LANGFUSE_BLOB_EXPORT_PARQUET_MIN_SIZE_BYTES: 1024,
   },
 }));
 
@@ -178,6 +179,7 @@ describe("handleBlobStorageIntegrationProjectJob parquet validation", () => {
     validParquet[1] = 0x41; // A
     validParquet[2] = 0x52; // R
     validParquet[3] = 0x31; // 1
+    validParquet.writeUInt32LE(64, 2040); // footer length
     validParquet[2044] = 0x50; // P
     validParquet[2045] = 0x41; // A
     validParquet[2046] = 0x52; // R

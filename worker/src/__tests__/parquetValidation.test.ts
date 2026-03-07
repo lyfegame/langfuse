@@ -1,6 +1,9 @@
 import { expect, it, describe } from "vitest";
 import { Readable } from "stream";
-import { createParquetValidationStream } from "../features/blobstorage/parquetValidation";
+import {
+  createParquetValidationStream,
+  MIN_VALID_PARQUET_SIZE,
+} from "../features/blobstorage/parquetValidation";
 
 /**
  * Consume a stream fully and return the concatenated buffer.
@@ -15,7 +18,7 @@ async function consumeStream(stream: Readable): Promise<Buffer> {
 
 /**
  * Build a minimal valid Parquet-like buffer: PAR1 magic at start and end,
- * plus padding to exceed 1 KiB.
+ * plus a valid trailer (4-byte footer length + PAR1 magic).
  */
 function buildValidParquetBuffer(size = 2048): Buffer {
   const buf = Buffer.alloc(size);
@@ -26,6 +29,9 @@ function buildValidParquetBuffer(size = 2048): Buffer {
   buf[3] = 0x31; // 1
 
   if (size >= 8) {
+    // Write footer length (little endian). Must be > 0 and <= size - 8.
+    const footerLength = Math.min(64, size - 8);
+    buf.writeUInt32LE(footerLength, size - 8);
     // Write PAR1 magic as last 4 bytes
     buf[size - 4] = 0x50; // P
     buf[size - 3] = 0x41; // A
@@ -122,11 +128,24 @@ describe("createParquetValidationStream", () => {
     expect(() => validate()).toThrow(/Invalid Parquet file/);
   });
 
+  it("should reject a file with PAR1 trailer but invalid footer length", async () => {
+    const data = buildValidParquetBuffer(2048);
+    // Corrupt footer length to exceed payload length.
+    data.writeUInt32LE(10_000, 2040);
+    const source = Readable.from([data]);
+
+    const { stream, validate } = createParquetValidationStream(source);
+    await consumeStream(stream);
+
+    expect(() => validate()).toThrow(/Invalid Parquet file/);
+  });
+
   it("should handle data arriving in multiple small chunks", async () => {
     // Send PAR1 magic split across two 2-byte chunks, then bulk data
     const chunk1 = Buffer.from([0x50, 0x41]); // PA
     const chunk2 = Buffer.from([0x52, 0x31]); // R1
     const chunk3 = Buffer.alloc(2048); // bulk padding + footer magic
+    chunk3.writeUInt32LE(64, chunk3.length - 8);
     chunk3[chunk3.length - 4] = 0x50; // P
     chunk3[chunk3.length - 3] = 0x41; // A
     chunk3[chunk3.length - 2] = 0x52; // R
@@ -145,8 +164,8 @@ describe("createParquetValidationStream", () => {
 
   it("should pass data through without modification", async () => {
     const data = buildValidParquetBuffer(4096);
-    // Fill with recognizable pattern while keeping header/footer magic.
-    for (let i = 4; i < data.length - 4; i++) {
+    // Fill with recognizable pattern while keeping header and trailer intact.
+    for (let i = 4; i < data.length - 8; i++) {
       data[i] = i % 256;
     }
     const source = Readable.from([data]);
@@ -168,5 +187,18 @@ describe("createParquetValidationStream", () => {
 
     const { stream } = createParquetValidationStream(source);
     await expect(consumeStream(stream)).rejects.toThrow("stream failure");
+  });
+
+  it("should honor custom minimum size threshold", async () => {
+    const data = buildValidParquetBuffer(2048);
+    const source = Readable.from([data]);
+
+    const { stream, validate } = createParquetValidationStream(source, {
+      minSizeBytes: 4096,
+    });
+    await consumeStream(stream);
+
+    expect(() => validate()).toThrow(/Invalid Parquet file/);
+    expect(MIN_VALID_PARQUET_SIZE).toBe(1024);
   });
 });

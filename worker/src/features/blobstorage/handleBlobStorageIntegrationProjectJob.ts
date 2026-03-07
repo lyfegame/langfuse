@@ -30,7 +30,6 @@ import { env } from "../../env";
 import {
   createParquetValidationStream,
   InvalidParquetPayloadError,
-  MIN_VALID_PARQUET_SIZE,
 } from "./parquetValidation";
 
 const getMinTimestampForExport = async (
@@ -234,9 +233,13 @@ const processBlobStorageExport = async (config: {
         config.minTimestamp,
         config.maxTimestamp,
       );
+      const minValidParquetSizeBytes =
+        env.LANGFUSE_BLOB_EXPORT_PARQUET_MIN_SIZE_BYTES;
 
       const { stream, validate, getValidationResult } =
-        createParquetValidationStream(rawStream);
+        createParquetValidationStream(rawStream, {
+          minSizeBytes: minValidParquetSizeBytes,
+        });
 
       await storageService.uploadFile({
         fileName: filePath,
@@ -261,8 +264,10 @@ const processBlobStorageExport = async (config: {
             filePath,
             sizeBytes: error.validation.sizeBytes,
             firstBytesHex: error.validation.headerHex,
-            lastBytesHex: error.validation.footerHex,
-            minValidParquetSizeBytes: MIN_VALID_PARQUET_SIZE,
+            trailerBytesHex: error.validation.trailerHex,
+            footerLengthBytes: error.validation.footerLengthBytes,
+            hasValidFooterLength: error.validation.hasValidFooterLength,
+            minValidParquetSizeBytes,
           });
         } else {
           const validation = getValidationResult();
@@ -273,8 +278,10 @@ const processBlobStorageExport = async (config: {
             filePath,
             sizeBytes: validation.sizeBytes,
             firstBytesHex: validation.headerHex,
-            lastBytesHex: validation.footerHex,
-            minValidParquetSizeBytes: MIN_VALID_PARQUET_SIZE,
+            trailerBytesHex: validation.trailerHex,
+            footerLengthBytes: validation.footerLengthBytes,
+            hasValidFooterLength: validation.hasValidFooterLength,
+            minValidParquetSizeBytes,
           });
         }
 

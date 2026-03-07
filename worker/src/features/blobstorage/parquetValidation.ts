@@ -9,9 +9,11 @@ export const MIN_VALID_PARQUET_SIZE = 1024;
 export type ParquetValidationResult = {
   sizeBytes: number;
   headerHex: string;
-  footerHex: string;
+  trailerHex: string;
+  footerLengthBytes: number | null;
   hasPar1Magic: boolean;
-  hasPar1Footer: boolean;
+  hasPar1Trailer: boolean;
+  hasValidFooterLength: boolean;
 };
 
 export class InvalidParquetPayloadError extends Error {
@@ -20,8 +22,8 @@ export class InvalidParquetPayloadError extends Error {
   constructor(validation: ParquetValidationResult) {
     super(
       `Invalid Parquet file: size=${validation.sizeBytes} bytes, ` +
-        `header=${validation.headerHex}, footer=${validation.footerHex}. ` +
-        `Expected PAR1 magic (50415231) at both start and end, and minimum > ${MIN_VALID_PARQUET_SIZE} bytes. ` +
+        `header=${validation.headerHex}, trailer=${validation.trailerHex}, footerLength=${validation.footerLengthBytes}. ` +
+        `Expected PAR1 magic (50415231) at start and trailer, valid footer length, and minimum size threshold. ` +
         `This typically indicates a ClickHouse error response was uploaded instead of data.`,
     );
     this.name = "InvalidParquetPayloadError";
@@ -29,19 +31,28 @@ export class InvalidParquetPayloadError extends Error {
   }
 }
 
+type CreateParquetValidationStreamOptions = {
+  minSizeBytes?: number;
+};
+
 /**
  * Wraps a Readable stream in a Transform that passes data through unchanged
- * while capturing the first 4 bytes and total byte count for post-upload
+ * while capturing the first 4 bytes, trailing 8-byte parquet trailer, and
+ * total byte count for post-upload
  * Parquet validation. Call `validate()` after the upload completes.
  */
-export function createParquetValidationStream(source: Readable): {
+export function createParquetValidationStream(
+  source: Readable,
+  options?: CreateParquetValidationStreamOptions,
+): {
   stream: Transform;
   getValidationResult: () => ParquetValidationResult;
   validate: () => void;
 } {
+  const minSizeBytes = options?.minSizeBytes ?? MIN_VALID_PARQUET_SIZE;
   let totalBytes = 0;
   let headerBytes = Buffer.alloc(0);
-  let footerBytes = Buffer.alloc(0);
+  let trailerBytes = Buffer.alloc(0);
 
   const transform = new Transform({
     transform(chunk, _encoding, callback) {
@@ -55,11 +66,11 @@ export function createParquetValidationStream(source: Readable): {
         ]);
       }
 
-      const footerCandidate = Buffer.concat([footerBytes, chunkBuffer]);
-      footerBytes =
-        footerCandidate.length <= 4
-          ? footerCandidate
-          : footerCandidate.subarray(footerCandidate.length - 4);
+      const trailerCandidate = Buffer.concat([trailerBytes, chunkBuffer]);
+      trailerBytes =
+        trailerCandidate.length <= 8
+          ? trailerCandidate
+          : trailerCandidate.subarray(trailerCandidate.length - 8);
 
       totalBytes += chunkBuffer.length;
       callback(null, chunkBuffer);
@@ -84,15 +95,24 @@ export function createParquetValidationStream(source: Readable): {
   const getValidationResult = (): ParquetValidationResult => {
     const hasPar1Magic =
       headerBytes.length === 4 && headerBytes.subarray(0, 4).equals(PAR1_MAGIC);
-    const hasPar1Footer =
-      footerBytes.length === 4 && footerBytes.subarray(0, 4).equals(PAR1_MAGIC);
+    const hasPar1Trailer =
+      trailerBytes.length === 8 &&
+      trailerBytes.subarray(4, 8).equals(PAR1_MAGIC);
+    const footerLengthBytes =
+      trailerBytes.length === 8 ? trailerBytes.readUInt32LE(0) : null;
+    const hasValidFooterLength =
+      footerLengthBytes !== null &&
+      footerLengthBytes > 0 &&
+      footerLengthBytes <= totalBytes - 8;
 
     return {
       sizeBytes: totalBytes,
       headerHex: headerBytes.toString("hex"),
-      footerHex: footerBytes.toString("hex"),
+      trailerHex: trailerBytes.toString("hex"),
+      footerLengthBytes,
       hasPar1Magic,
-      hasPar1Footer,
+      hasPar1Trailer,
+      hasValidFooterLength,
     };
   };
 
@@ -103,9 +123,10 @@ export function createParquetValidationStream(source: Readable): {
       const result = getValidationResult();
 
       if (
-        result.sizeBytes <= MIN_VALID_PARQUET_SIZE ||
+        result.sizeBytes <= minSizeBytes ||
         !result.hasPar1Magic ||
-        !result.hasPar1Footer
+        !result.hasPar1Trailer ||
+        !result.hasValidFooterLength
       ) {
         throw new InvalidParquetPayloadError(result);
       }
