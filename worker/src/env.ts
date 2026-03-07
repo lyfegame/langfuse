@@ -175,6 +175,14 @@ const EnvSchema = z.object({
     .nonnegative()
     .default(15 * 60 * 1000), // 15 minutes
 
+  // Minimum size gate for parquet export payload validation.
+  // Files must be strictly larger than this value.
+  LANGFUSE_BLOB_EXPORT_PARQUET_MIN_SIZE_BYTES: z.coerce
+    .number()
+    .int()
+    .nonnegative()
+    .default(1024),
+
   // Flags to toggle queue consumers on or off.
   QUEUE_CONSUMER_CLOUD_USAGE_METERING_QUEUE_IS_ENABLED: z
     .enum(["true", "false"])
