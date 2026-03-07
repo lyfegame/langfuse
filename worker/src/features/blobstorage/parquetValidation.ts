@@ -56,6 +56,19 @@ export function createParquetValidationStream(source: Readable): {
     },
   });
 
+  const forwardSourceError = (error: unknown) => {
+    transform.destroy(
+      error instanceof Error
+        ? error
+        : new Error(`Stream error: ${String(error)}`),
+    );
+  };
+
+  source.once("error", forwardSourceError);
+  transform.once("close", () => {
+    source.off("error", forwardSourceError);
+  });
+
   source.pipe(transform);
 
   const getValidationResult = (): ParquetValidationResult => {

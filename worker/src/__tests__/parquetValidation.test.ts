@@ -129,4 +129,16 @@ describe("createParquetValidationStream", () => {
     expect(output.equals(data)).toBe(true);
     expect(() => validate()).not.toThrow();
   });
+
+  it("should propagate source stream errors", async () => {
+    const source = new Readable({
+      read() {
+        this.push(Buffer.from([0x50, 0x41, 0x52, 0x31]));
+        this.destroy(new Error("stream failure"));
+      },
+    });
+
+    const { stream } = createParquetValidationStream(source);
+    await expect(consumeStream(stream)).rejects.toThrow("stream failure");
+  });
 });
