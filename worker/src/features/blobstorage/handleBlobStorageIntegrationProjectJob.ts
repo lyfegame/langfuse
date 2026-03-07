@@ -27,6 +27,11 @@ import {
 import { decrypt } from "@langfuse/shared/encryption";
 import { randomUUID } from "crypto";
 import { env } from "../../env";
+import {
+  createParquetValidationStream,
+  InvalidParquetPayloadError,
+  MIN_VALID_PARQUET_SIZE,
+} from "./parquetValidation";
 
 const getMinTimestampForExport = async (
   projectId: string,
@@ -224,11 +229,14 @@ const processBlobStorageExport = async (config: {
         scores: getScoresForBlobStorageExportParquet,
       }[table];
 
-      const stream = await parquetStreamFn(
+      const rawStream = await parquetStreamFn(
         config.projectId,
         config.minTimestamp,
         config.maxTimestamp,
       );
+
+      const { stream, validate, getValidationResult } =
+        createParquetValidationStream(rawStream);
 
       await storageService.uploadFile({
         fileName: filePath,
@@ -236,6 +244,39 @@ const processBlobStorageExport = async (config: {
         data: stream,
         partSize: 100 * 1024 * 1024, // 100 MB part size
       });
+
+      // Validate PAR1 magic bytes and minimum size to detect ClickHouse error
+      // responses uploaded as .parquet files (e.g., OOM or timeout error text).
+      // On failure, the error propagates to the adaptive window splitter which
+      // retries the window — the cursor is NOT advanced.
+      try {
+        validate();
+      } catch (error) {
+        if (error instanceof InvalidParquetPayloadError) {
+          logger.error({
+            message: "blob_export_parquet_validation_failed",
+            projectId: config.projectId,
+            table,
+            filePath,
+            sizeBytes: error.validation.sizeBytes,
+            firstBytesHex: error.validation.headerHex,
+            minValidParquetSizeBytes: MIN_VALID_PARQUET_SIZE,
+          });
+        } else {
+          const validation = getValidationResult();
+          logger.error({
+            message: "blob_export_parquet_validation_failed",
+            projectId: config.projectId,
+            table,
+            filePath,
+            sizeBytes: validation.sizeBytes,
+            firstBytesHex: validation.headerHex,
+            minValidParquetSizeBytes: MIN_VALID_PARQUET_SIZE,
+          });
+        }
+
+        throw error;
+      }
     } else {
       // Legacy path for events (observations_v2): JSON → transform → upload
       const blobStorageProps = getFileTypeProperties(config.fileType);
