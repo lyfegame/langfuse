@@ -14,7 +14,8 @@ async function consumeStream(stream: Readable): Promise<Buffer> {
 }
 
 /**
- * Build a minimal valid Parquet-like buffer: PAR1 magic + padding to exceed 1 KiB.
+ * Build a minimal valid Parquet-like buffer: PAR1 magic at start and end,
+ * plus padding to exceed 1 KiB.
  */
 function buildValidParquetBuffer(size = 2048): Buffer {
   const buf = Buffer.alloc(size);
@@ -23,6 +24,14 @@ function buildValidParquetBuffer(size = 2048): Buffer {
   buf[1] = 0x41; // A
   buf[2] = 0x52; // R
   buf[3] = 0x31; // 1
+
+  if (size >= 8) {
+    // Write PAR1 magic as last 4 bytes
+    buf[size - 4] = 0x50; // P
+    buf[size - 3] = 0x41; // A
+    buf[size - 2] = 0x52; // R
+    buf[size - 1] = 0x31; // 1
+  }
   return buf;
 }
 
@@ -98,11 +107,30 @@ describe("createParquetValidationStream", () => {
     expect(() => validate()).toThrow(/Invalid Parquet file/);
   });
 
+  it("should reject a file with PAR1 header but invalid footer", async () => {
+    const data = Buffer.alloc(2048);
+    data[0] = 0x50; // P
+    data[1] = 0x41; // A
+    data[2] = 0x52; // R
+    data[3] = 0x31; // 1
+    // Footer intentionally left invalid (all zeros)
+    const source = Readable.from([data]);
+
+    const { stream, validate } = createParquetValidationStream(source);
+    await consumeStream(stream);
+
+    expect(() => validate()).toThrow(/Invalid Parquet file/);
+  });
+
   it("should handle data arriving in multiple small chunks", async () => {
     // Send PAR1 magic split across two 2-byte chunks, then bulk data
     const chunk1 = Buffer.from([0x50, 0x41]); // PA
     const chunk2 = Buffer.from([0x52, 0x31]); // R1
-    const chunk3 = Buffer.alloc(2048); // bulk padding
+    const chunk3 = Buffer.alloc(2048); // bulk padding + footer magic
+    chunk3[chunk3.length - 4] = 0x50; // P
+    chunk3[chunk3.length - 3] = 0x41; // A
+    chunk3[chunk3.length - 2] = 0x52; // R
+    chunk3[chunk3.length - 1] = 0x31; // 1
     const source = Readable.from([chunk1, chunk2, chunk3]);
 
     const { stream, validate } = createParquetValidationStream(source);
@@ -117,8 +145,8 @@ describe("createParquetValidationStream", () => {
 
   it("should pass data through without modification", async () => {
     const data = buildValidParquetBuffer(4096);
-    // Fill with recognizable pattern after magic bytes
-    for (let i = 4; i < data.length; i++) {
+    // Fill with recognizable pattern while keeping header/footer magic.
+    for (let i = 4; i < data.length - 4; i++) {
       data[i] = i % 256;
     }
     const source = Readable.from([data]);

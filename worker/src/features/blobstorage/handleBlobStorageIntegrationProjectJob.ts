@@ -245,8 +245,9 @@ const processBlobStorageExport = async (config: {
         partSize: 100 * 1024 * 1024, // 100 MB part size
       });
 
-      // Validate PAR1 magic bytes and minimum size to detect ClickHouse error
-      // responses uploaded as .parquet files (e.g., OOM or timeout error text).
+      // Validate PAR1 magic bytes (header + footer) and minimum size to detect
+      // ClickHouse error responses uploaded as .parquet files (e.g., OOM or
+      // timeout error text) and truncated/corrupted uploads.
       // On failure, the error propagates to the adaptive window splitter which
       // retries the window — the cursor is NOT advanced.
       try {
@@ -260,6 +261,7 @@ const processBlobStorageExport = async (config: {
             filePath,
             sizeBytes: error.validation.sizeBytes,
             firstBytesHex: error.validation.headerHex,
+            lastBytesHex: error.validation.footerHex,
             minValidParquetSizeBytes: MIN_VALID_PARQUET_SIZE,
           });
         } else {
@@ -271,6 +273,7 @@ const processBlobStorageExport = async (config: {
             filePath,
             sizeBytes: validation.sizeBytes,
             firstBytesHex: validation.headerHex,
+            lastBytesHex: validation.footerHex,
             minValidParquetSizeBytes: MIN_VALID_PARQUET_SIZE,
           });
         }

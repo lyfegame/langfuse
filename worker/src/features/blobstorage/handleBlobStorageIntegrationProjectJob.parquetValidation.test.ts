@@ -178,6 +178,10 @@ describe("handleBlobStorageIntegrationProjectJob parquet validation", () => {
     validParquet[1] = 0x41; // A
     validParquet[2] = 0x52; // R
     validParquet[3] = 0x31; // 1
+    validParquet[2044] = 0x50; // P
+    validParquet[2045] = 0x41; // A
+    validParquet[2046] = 0x52; // R
+    validParquet[2047] = 0x31; // 1
 
     mocks.getTracesForBlobStorageExportParquet.mockResolvedValue(
       Readable.from([validParquet]),
