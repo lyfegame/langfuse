@@ -28,9 +28,10 @@ function buildValidParquetBuffer(size = 2048): Buffer {
   buf[2] = 0x52; // R
   buf[3] = 0x31; // 1
 
-  if (size >= 8) {
-    // Write footer length (little endian). Must be > 0 and <= size - 8.
-    const footerLength = Math.min(64, size - 8);
+  if (size >= 12) {
+    // Write footer length (little endian). Must be > 0 and <= size - 12
+    // (4-byte header + footer metadata + 4-byte footer length + 4-byte trailer).
+    const footerLength = Math.min(64, size - 12);
     buf.writeUInt32LE(footerLength, size - 8);
     // Write PAR1 magic as last 4 bytes
     buf[size - 4] = 0x50; // P
@@ -140,6 +141,32 @@ describe("createParquetValidationStream", () => {
     expect(() => validate()).toThrow(/Invalid Parquet file/);
   });
 
+  it("should reject a footer length that overlaps with the header magic", async () => {
+    // For a 2048-byte file, the max valid footer length is 2048 - 12 = 2036
+    // (4 bytes header + footerLength bytes FileMetaData + 4 bytes footer len + 4 bytes trailer).
+    // A footer length of 2037 would imply FileMetaData overlaps the PAR1 header.
+    const data = buildValidParquetBuffer(2048);
+    data.writeUInt32LE(2037, 2040); // 1 byte too large
+    const source = Readable.from([data]);
+
+    const { stream, validate } = createParquetValidationStream(source);
+    await consumeStream(stream);
+
+    expect(() => validate()).toThrow(/Invalid Parquet file/);
+  });
+
+  it("should accept a footer length that exactly fills the space between header and trailer", async () => {
+    // Max valid footer length for 2048 bytes = 2048 - 12 = 2036
+    const data = buildValidParquetBuffer(2048);
+    data.writeUInt32LE(2036, 2040);
+    const source = Readable.from([data]);
+
+    const { stream, validate } = createParquetValidationStream(source);
+    await consumeStream(stream);
+
+    expect(() => validate()).not.toThrow();
+  });
+
   it("should handle data arriving in multiple small chunks", async () => {
     // Send PAR1 magic split across two 2-byte chunks, then bulk data
     const chunk1 = Buffer.from([0x50, 0x41]); // PA
@@ -159,6 +186,20 @@ describe("createParquetValidationStream", () => {
     expect(output.length).toBe(2052);
 
     // Validation should pass — magic bytes correctly reassembled
+    expect(() => validate()).not.toThrow();
+  });
+
+  it("should handle trailer split across the last two chunks", async () => {
+    // Build a valid parquet buffer and split so the 8-byte trailer spans two chunks.
+    const full = buildValidParquetBuffer(2048);
+    const bodyChunk = full.subarray(0, 2045); // everything up to last 3 bytes
+    const tailChunk = full.subarray(2045); // last 3 bytes (partial trailer)
+    const source = Readable.from([bodyChunk, tailChunk]);
+
+    const { stream, validate } = createParquetValidationStream(source);
+    const output = await consumeStream(stream);
+
+    expect(output.length).toBe(2048);
     expect(() => validate()).not.toThrow();
   });
 

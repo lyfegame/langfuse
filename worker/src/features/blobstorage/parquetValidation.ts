@@ -100,10 +100,12 @@ export function createParquetValidationStream(
       trailerBytes.subarray(4, 8).equals(PAR1_MAGIC);
     const footerLengthBytes =
       trailerBytes.length === 8 ? trailerBytes.readUInt32LE(0) : null;
+    // Footer length must fit between the 4-byte header magic and the 8-byte
+    // trailer (4-byte footer length field + 4-byte PAR1 magic).
     const hasValidFooterLength =
       footerLengthBytes !== null &&
       footerLengthBytes > 0 &&
-      footerLengthBytes <= totalBytes - 8;
+      footerLengthBytes <= totalBytes - 12;
 
     return {
       sizeBytes: totalBytes,

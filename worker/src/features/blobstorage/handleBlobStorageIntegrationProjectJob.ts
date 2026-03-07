@@ -256,6 +256,18 @@ const processBlobStorageExport = async (config: {
       try {
         validate();
       } catch (error) {
+        try {
+          await storageService.deleteFiles([filePath]);
+        } catch (cleanupError) {
+          logger.error({
+            message: "blob_export_parquet_validation_cleanup_failed",
+            projectId: config.projectId,
+            table,
+            filePath,
+            error: cleanupError,
+          });
+        }
+
         if (error instanceof InvalidParquetPayloadError) {
           logger.error({
             message: "blob_export_parquet_validation_failed",

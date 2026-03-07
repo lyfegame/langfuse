@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   findUnique: vi.fn(),
   update: vi.fn(),
   uploadFile: vi.fn(),
+  deleteFiles: vi.fn(),
   getInstance: vi.fn(),
   getTracesForBlobStorageExportParquet: vi.fn(),
   logger: {
@@ -133,6 +134,7 @@ describe("handleBlobStorageIntegrationProjectJob parquet validation", () => {
     mocks.update.mockResolvedValue(undefined);
     mocks.getInstance.mockReturnValue({
       uploadFile: mocks.uploadFile,
+      deleteFiles: mocks.deleteFiles,
     });
     mocks.uploadFile.mockImplementation(async (params: { data: Readable }) => {
       await consumeUploadData(params.data);
@@ -157,6 +159,10 @@ describe("handleBlobStorageIntegrationProjectJob parquet validation", () => {
     ).rejects.toThrow(/Invalid Parquet file/);
 
     expect(mocks.update).not.toHaveBeenCalled();
+    expect(mocks.deleteFiles).toHaveBeenCalled();
+    expect(mocks.deleteFiles.mock.calls[0]?.[0]?.[0]).toContain(
+      `${PROJECT_ID}/traces/`,
+    );
 
     const validationErrorCall = mocks.logger.error.mock.calls.find(
       ([arg]) => arg?.message === "blob_export_parquet_validation_failed",
@@ -196,6 +202,7 @@ describe("handleBlobStorageIntegrationProjectJob parquet validation", () => {
     ).resolves.toBeUndefined();
 
     expect(mocks.update).toHaveBeenCalledTimes(1);
+    expect(mocks.deleteFiles).not.toHaveBeenCalled();
     const updateInput = mocks.update.mock.calls[0][0];
     expect(updateInput.where).toEqual({ projectId: PROJECT_ID });
     expect(updateInput.data.lastSyncAt.toISOString()).toBe(
