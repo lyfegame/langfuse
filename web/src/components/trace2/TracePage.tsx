@@ -37,6 +37,7 @@ export function TracePage({
       traceId,
       timestamp,
       projectId: routeProjectId,
+      verbosity: "truncated",
     },
     {
       enabled: !isBetaEnabled,

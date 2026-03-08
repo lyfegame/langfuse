@@ -1,3 +1,5 @@
+import { auditLog } from "@/src/features/audit-logs/auditLog";
+import { env } from "@/src/env.mjs";
 import { createAuthedProjectAPIRoute } from "@/src/features/public-api/server/createAuthedProjectAPIRoute";
 import { withMiddlewares } from "@/src/features/public-api/server/withMiddlewares";
 import { transformDbToApiObservation } from "@/src/features/public-api/types/observations";
@@ -20,7 +22,6 @@ import {
   traceDeletionProcessor,
 } from "@langfuse/shared/src/server";
 import Decimal from "decimal.js";
-import { auditLog } from "@/src/features/audit-logs/auditLog";
 
 export default withMiddlewares({
   GET: createAuthedProjectAPIRoute({
@@ -29,11 +30,18 @@ export default withMiddlewares({
     responseSchema: GetTraceV1Response,
     fn: async ({ query, auth }) => {
       const { traceId } = query;
+      const includeIO =
+        query.includeIO ??
+        env.LANGFUSE_API_TRACE_DETAIL_INCLUDE_IO_DEFAULT === "true";
+      const includeObservationIO =
+        query.includeObservationIO ??
+        env.LANGFUSE_API_TRACE_DETAIL_INCLUDE_OBSERVATION_IO_DEFAULT === "true";
       const trace = await getTraceById({
         traceId,
         projectId: auth.scope.projectId,
         clickhouseFeatureTag: "tracing-public-api",
         preferredClickhouseService: "ReadOnly",
+        excludeInputOutput: !includeIO,
       });
 
       if (!trace) {
@@ -47,7 +55,7 @@ export default withMiddlewares({
           traceId,
           projectId: auth.scope.projectId,
           timestamp: trace?.timestamp,
-          includeIO: true,
+          includeIO: includeObservationIO,
           preferredClickhouseService: "ReadOnly",
         }),
         getScoresForTraces({
@@ -100,7 +108,19 @@ export default withMiddlewares({
         };
       });
 
-      const outObservations = observationsView.map(transformDbToApiObservation);
+      const outObservations = observationsView.map((observation) => {
+        const transformed = transformDbToApiObservation(observation);
+        if (includeObservationIO) {
+          return transformed;
+        }
+
+        return {
+          ...transformed,
+          input: null,
+          output: null,
+          metadata: null,
+        };
+      });
       // As these are traces scores, we expect all scores to have a traceId set
       // For type consistency, we validate the scores against the v1 schema which requires a traceId
       const validatedScores = filterAndValidateDbTraceScoreList({

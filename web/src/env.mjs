@@ -373,6 +373,12 @@ export const env = createEnv({
       .enum(["true", "false"])
       .default("false"),
     LANGFUSE_API_TRACES_DEFAULT_FIELDS: z.string().optional(),
+    LANGFUSE_API_TRACE_DETAIL_INCLUDE_IO_DEFAULT: z
+      .enum(["true", "false"])
+      .default("true"),
+    LANGFUSE_API_TRACE_DETAIL_INCLUDE_OBSERVATION_IO_DEFAULT: z
+      .enum(["true", "false"])
+      .default("true"),
 
     // Events table migration
     LANGFUSE_ENABLE_EVENTS_TABLE_OBSERVATIONS: z
@@ -735,6 +741,10 @@ export const env = createEnv({
       process.env.LANGFUSE_API_TRACES_REJECT_NO_DATE_RANGE,
     LANGFUSE_API_TRACES_DEFAULT_FIELDS:
       process.env.LANGFUSE_API_TRACES_DEFAULT_FIELDS,
+    LANGFUSE_API_TRACE_DETAIL_INCLUDE_IO_DEFAULT:
+      process.env.LANGFUSE_API_TRACE_DETAIL_INCLUDE_IO_DEFAULT,
+    LANGFUSE_API_TRACE_DETAIL_INCLUDE_OBSERVATION_IO_DEFAULT:
+      process.env.LANGFUSE_API_TRACE_DETAIL_INCLUDE_OBSERVATION_IO_DEFAULT,
     // Events table migration
     LANGFUSE_ENABLE_EVENTS_TABLE_OBSERVATIONS:
       process.env.LANGFUSE_ENABLE_EVENTS_TABLE_OBSERVATIONS,

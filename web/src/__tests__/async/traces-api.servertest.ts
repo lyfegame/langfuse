@@ -617,6 +617,144 @@ describe("/api/public/traces API Endpoint", () => {
     });
   });
 
+  describe("GET /api/public/traces/{traceId} IO controls", () => {
+    const originalIncludeIODefault =
+      env.LANGFUSE_API_TRACE_DETAIL_INCLUDE_IO_DEFAULT;
+    const originalIncludeObservationIODefault =
+      env.LANGFUSE_API_TRACE_DETAIL_INCLUDE_OBSERVATION_IO_DEFAULT;
+
+    afterEach(() => {
+      (env as any).LANGFUSE_API_TRACE_DETAIL_INCLUDE_IO_DEFAULT =
+        originalIncludeIODefault;
+      (env as any).LANGFUSE_API_TRACE_DETAIL_INCLUDE_OBSERVATION_IO_DEFAULT =
+        originalIncludeObservationIODefault;
+    });
+
+    it("should omit trace and observation IO when defaults disable it", async () => {
+      (env as any).LANGFUSE_API_TRACE_DETAIL_INCLUDE_IO_DEFAULT = "false";
+      (env as any).LANGFUSE_API_TRACE_DETAIL_INCLUDE_OBSERVATION_IO_DEFAULT =
+        "false";
+
+      const traceId = randomUUID();
+      await createTracesCh([
+        createTrace({
+          id: traceId,
+          name: "trace-with-omitted-io",
+          project_id: projectId,
+          input: JSON.stringify({ prompt: "hello" }),
+          output: JSON.stringify({ response: "world" }),
+        }),
+      ]);
+      await createObservationsCh([
+        createObservation({
+          trace_id: traceId,
+          project_id: projectId,
+          input: JSON.stringify({ question: "what" }),
+          output: JSON.stringify({ answer: "ok" }),
+          metadata: { foo: "bar" },
+        }),
+      ]);
+
+      const response = await makeZodVerifiedAPICall(
+        GetTraceV1Response,
+        "GET",
+        `/api/public/traces/${traceId}`,
+      );
+
+      expect(response.body.input).toBeNull();
+      expect(response.body.output).toBeNull();
+      expect(response.body.observations).toHaveLength(1);
+      expect(response.body.observations[0]?.input).toBeNull();
+      expect(response.body.observations[0]?.output).toBeNull();
+      expect(response.body.observations[0]?.metadata).toBeNull();
+    });
+
+    it("should allow callers to override omitted IO defaults", async () => {
+      (env as any).LANGFUSE_API_TRACE_DETAIL_INCLUDE_IO_DEFAULT = "false";
+      (env as any).LANGFUSE_API_TRACE_DETAIL_INCLUDE_OBSERVATION_IO_DEFAULT =
+        "false";
+
+      const traceId = randomUUID();
+      await createTracesCh([
+        createTrace({
+          id: traceId,
+          name: "trace-with-override",
+          project_id: projectId,
+          input: JSON.stringify({ prompt: "hello" }),
+          output: JSON.stringify({ response: "world" }),
+        }),
+      ]);
+      await createObservationsCh([
+        createObservation({
+          trace_id: traceId,
+          project_id: projectId,
+          input: JSON.stringify({ question: "what" }),
+          output: JSON.stringify({ answer: "ok" }),
+          metadata: { foo: "bar" },
+        }),
+      ]);
+
+      const response = await makeZodVerifiedAPICall(
+        GetTraceV1Response,
+        "GET",
+        `/api/public/traces/${traceId}?includeIO=true&includeObservationIO=true`,
+      );
+
+      expect(response.body.input).toEqual({ prompt: "hello" });
+      expect(response.body.output).toEqual({ response: "world" });
+      expect(response.body.observations[0]?.input).toEqual({
+        question: "what",
+      });
+      expect(response.body.observations[0]?.output).toEqual({ answer: "ok" });
+      expect(response.body.observations[0]?.metadata).toEqual({ foo: "bar" });
+    });
+
+    it("should avoid observation payload-size failures when IO defaults are disabled", async () => {
+      (env as any).LANGFUSE_API_TRACE_DETAIL_INCLUDE_IO_DEFAULT = "false";
+      (env as any).LANGFUSE_API_TRACE_DETAIL_INCLUDE_OBSERVATION_IO_DEFAULT =
+        "false";
+
+      const traceId = randomUUID();
+      await createTracesCh([
+        createTrace({
+          id: traceId,
+          name: "trace-with-large-observations",
+          project_id: projectId,
+          input: JSON.stringify({ prompt: "hello" }),
+        }),
+      ]);
+      await createObservationsCh([
+        createObservation({
+          trace_id: traceId,
+          project_id: projectId,
+          input: "a".repeat(30e6),
+          output: "b".repeat(30e6),
+          metadata: { foo: "c".repeat(30e6) },
+        }),
+        createObservation({
+          trace_id: traceId,
+          project_id: projectId,
+          input: "a".repeat(30e6),
+          output: "b".repeat(30e6),
+          metadata: { foo: "c".repeat(30e6) },
+        }),
+      ]);
+
+      const response = await makeZodVerifiedAPICall(
+        GetTraceV1Response,
+        "GET",
+        `/api/public/traces/${traceId}`,
+      );
+
+      expect(response.status).toBe(200);
+      expect(response.body.input).toBeNull();
+      expect(response.body.observations).toHaveLength(2);
+      expect(response.body.observations[0]?.input).toBeNull();
+      expect(response.body.observations[0]?.output).toBeNull();
+      expect(response.body.observations[0]?.metadata).toBeNull();
+    });
+  });
+
   it("should return 5XX if observations are too large when fetching single trace", async () => {
     // See LFE-4882 for context
     const traceId = randomUUID();
