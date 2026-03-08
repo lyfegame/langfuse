@@ -702,7 +702,9 @@ describe("/api/public/traces API Endpoint", () => {
 
       expect(response.body.input).toEqual({ prompt: "hello" });
       expect(response.body.output).toEqual({ response: "world" });
-      expect(response.body.observations[0]?.input).toEqual({ question: "what" });
+      expect(response.body.observations[0]?.input).toEqual({
+        question: "what",
+      });
       expect(response.body.observations[0]?.output).toEqual({ answer: "ok" });
       expect(response.body.observations[0]?.metadata).toEqual({ foo: "bar" });
     });

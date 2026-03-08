@@ -157,9 +157,8 @@ export function StarTraceDetailsToggle({
       setIsLoading(true);
 
       // Snapshot the previous value
-      const prevData = utils.traces.byIdWithObservationsAndScores.getData(
-        traceDetailQuery,
-      );
+      const prevData =
+        utils.traces.byIdWithObservationsAndScores.getData(traceDetailQuery);
 
       // Optimistically update to the new value
       utils.traces.byIdWithObservationsAndScores.setData(

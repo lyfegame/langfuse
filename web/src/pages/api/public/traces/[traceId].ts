@@ -35,8 +35,7 @@ export default withMiddlewares({
         env.LANGFUSE_API_TRACE_DETAIL_INCLUDE_IO_DEFAULT === "true";
       const includeObservationIO =
         query.includeObservationIO ??
-        env.LANGFUSE_API_TRACE_DETAIL_INCLUDE_OBSERVATION_IO_DEFAULT ===
-          "true";
+        env.LANGFUSE_API_TRACE_DETAIL_INCLUDE_OBSERVATION_IO_DEFAULT === "true";
       const trace = await getTraceById({
         traceId,
         projectId: auth.scope.projectId,
