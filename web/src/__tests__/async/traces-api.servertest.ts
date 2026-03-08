@@ -756,69 +756,66 @@ describe("/api/public/traces API Endpoint", () => {
     });
   });
 
-  it(
-    "should return 413 with guidance if observation IO is too large when explicitly requested",
-    async () => {
-      // See LFE-4882 for context
-      const traceId = randomUUID();
-      const trace = createTrace({
-        id: traceId,
-        name: "trace-name1",
+  it("should return 413 with guidance if observation IO is too large when explicitly requested", async () => {
+    // See LFE-4882 for context
+    const traceId = randomUUID();
+    const trace = createTrace({
+      id: traceId,
+      name: "trace-name1",
+      project_id: projectId,
+      metadata: { key: JSON.stringify({ foo: "bar" }) },
+      input: JSON.stringify({
+        args: [
+          {
+            foo: "bar",
+          },
+        ],
+      }),
+    });
+
+    await createTracesCh([trace]);
+    await createObservationsCh([
+      createObservation({
+        trace_id: traceId,
         project_id: projectId,
-        metadata: { key: JSON.stringify({ foo: "bar" }) },
-        input: JSON.stringify({
-          args: [
-            {
-              foo: "bar",
-            },
-          ],
-        }),
-      });
-
-      await createTracesCh([trace]);
-      await createObservationsCh([
-        createObservation({
-          trace_id: traceId,
-          project_id: projectId,
-          input: "a".repeat(30e6),
-          output: "b".repeat(30e6),
-          metadata: {
-            foo: "c".repeat(30e6),
-          },
-        }),
-      ]);
-      await createObservationsCh([
-        createObservation({
-          trace_id: traceId,
-          project_id: projectId,
-          input: "a".repeat(30e6),
-          output: "b".repeat(30e6),
-          metadata: {
-            foo: "c".repeat(30e6),
-          },
-        }),
-      ]);
-
-      const response = await makeAPICall(
-        "GET",
-        `/api/public/traces/${traceId}?includeObservationIO=true`,
-      );
-
-      expect(response.status).toBe(413);
-      expect(response.body).toMatchObject({
-        error: "TraceObservationPayloadTooLargeError",
-        details: {
-          traceId,
-          observationCount: 2,
-          estimatedBytes: 180e6,
-          limitBytes: 80e6,
+        input: "a".repeat(30e6),
+        output: "b".repeat(30e6),
+        metadata: {
+          foo: "c".repeat(30e6),
         },
-      });
-      expect((response.body as { message: string }).message).toContain(
-        `/api/public/observations?traceId=${traceId}&type=GENERATION|TOOL&limit=20`,
-      );
-    },
-  );
+      }),
+    ]);
+    await createObservationsCh([
+      createObservation({
+        trace_id: traceId,
+        project_id: projectId,
+        input: "a".repeat(30e6),
+        output: "b".repeat(30e6),
+        metadata: {
+          foo: "c".repeat(30e6),
+        },
+      }),
+    ]);
+
+    const response = await makeAPICall(
+      "GET",
+      `/api/public/traces/${traceId}?includeObservationIO=true`,
+    );
+
+    expect(response.status).toBe(413);
+    expect(response.body).toMatchObject({
+      error: "TraceObservationPayloadTooLargeError",
+      details: {
+        traceId,
+        observationCount: 2,
+        estimatedBytes: 180e6,
+        limitBytes: 80e6,
+      },
+    });
+    expect((response.body as { message: string }).message).toContain(
+      `/api/public/observations?traceId=${traceId}&type=GENERATION|TOOL&limit=20`,
+    );
+  });
 
   it("should delete a single trace via DELETE /traces/:traceId", async () => {
     // Setup
