@@ -8,5 +8,9 @@ export { ApiError } from "./ApiError";
 export { InternalServerError } from "./InternalServerError";
 export { LangfuseConflictError } from "./ConflictError";
 export { ServiceUnavailableError } from "./ServiceUnavailableError";
+export {
+  TraceObservationPayloadTooLargeError,
+  type TraceObservationPayloadTooLargeDetails,
+} from "./TraceObservationPayloadTooLargeError";
 export { NotImplementedError } from "./NotImplementedError";
 export * from "./errorMessages";
