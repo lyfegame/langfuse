@@ -64,12 +64,6 @@ export function StarTraceToggle({
   });
   const capture = usePostHogClientCapture();
   const [isLoading, setIsLoading] = useState(false);
-  const traceDetailQuery = {
-    traceId,
-    projectId,
-    timestamp,
-    verbosity: "truncated" as const,
-  };
 
   const mutBookmarkTrace = api.traces.bookmark.useMutation({
     onMutate: async (newBookmarkState) => {
