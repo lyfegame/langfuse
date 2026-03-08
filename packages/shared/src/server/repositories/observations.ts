@@ -7,7 +7,11 @@ import {
   upsertClickhouse,
 } from "./clickhouse";
 import { logger } from "../logger";
-import { InternalServerError, LangfuseNotFoundError } from "../../errors";
+import {
+  InternalServerError,
+  LangfuseNotFoundError,
+  TraceObservationPayloadTooLargeError,
+} from "../../errors";
 import { prisma } from "../../db";
 import { ObservationRecordReadType } from "./definitions";
 import { FilterState } from "../../types";
@@ -124,6 +128,73 @@ export const upsertObservation = async (
   });
 };
 
+export type TraceObservationIOStats = {
+  observationCount: number;
+  estimatedPayloadSizeBytes: number;
+};
+
+export const getObservationIOStatsForTrace = async (opts: {
+  traceId: string;
+  projectId: string;
+  timestamp?: Date;
+  preferredClickhouseService?: PreferredClickhouseService;
+}): Promise<TraceObservationIOStats> => {
+  const { traceId, projectId, timestamp, preferredClickhouseService } = opts;
+
+  const skipDedup = await shouldSkipObservationsFinal(projectId);
+
+  const query = `
+  SELECT
+    count() AS observationCount,
+    coalesce(
+      sum(
+        length(ifNull(input, '')) +
+        length(ifNull(output, '')) +
+        arraySum(arrayMap(value -> length(value), mapValues(metadata)))
+      ),
+      0
+    ) AS estimatedPayloadSizeBytes
+  FROM (
+    SELECT
+      id,
+      project_id,
+      input,
+      output,
+      metadata
+    FROM observations
+    WHERE trace_id = {traceId: String}
+    AND project_id = {projectId: String}
+     ${timestamp ? `AND start_time >= {traceTimestamp: DateTime64(3)} - ${TRACE_TO_OBSERVATIONS_INTERVAL}` : ""}
+    ${skipDedup ? "" : "ORDER BY event_ts DESC"}
+    ${skipDedup ? "" : "LIMIT 1 BY id, project_id"}
+  )`;
+
+  const [stats] = await queryClickhouse<TraceObservationIOStats>({
+    query,
+    params: {
+      traceId,
+      projectId,
+      ...(timestamp
+        ? { traceTimestamp: convertDateToClickhouseDateTime(timestamp) }
+        : {}),
+    },
+    tags: {
+      feature: "tracing",
+      type: "observation",
+      kind: "aggregate",
+      projectId,
+    },
+    preferredClickhouseService,
+  });
+
+  return (
+    stats ?? {
+      observationCount: 0,
+      estimatedPayloadSizeBytes: 0,
+    }
+  );
+};
+
 export type GetObservationsForTraceOpts<IncludeIO extends boolean> = {
   traceId: string;
   projectId: string;
@@ -187,6 +258,28 @@ export const getObservationsForTrace = async <IncludeIO extends boolean>(
    ${timestamp ? `AND start_time >= {traceTimestamp: DateTime64(3)} - ${TRACE_TO_OBSERVATIONS_INTERVAL}` : ""}
   ${skipDedup ? "" : "ORDER BY event_ts DESC"}
   ${skipDedup ? "" : "LIMIT 1 BY id, project_id"}`;
+  if (includeIO === true) {
+    const { observationCount, estimatedPayloadSizeBytes } =
+      await getObservationIOStatsForTrace({
+        traceId,
+        projectId,
+        timestamp,
+        preferredClickhouseService,
+      });
+
+    if (
+      estimatedPayloadSizeBytes >=
+      env.LANGFUSE_API_TRACE_OBSERVATIONS_SIZE_LIMIT_BYTES
+    ) {
+      throw new TraceObservationPayloadTooLargeError({
+        traceId,
+        observationCount,
+        estimatedBytes: estimatedPayloadSizeBytes,
+        limitBytes: env.LANGFUSE_API_TRACE_OBSERVATIONS_SIZE_LIMIT_BYTES,
+      });
+    }
+  }
+
   const records = await queryClickhouse<ObservationRecordReadType>({
     query,
     params: {
@@ -230,9 +323,12 @@ export const getObservationsForTrace = async <IncludeIO extends boolean>(
     });
 
     if (payloadSize >= env.LANGFUSE_API_TRACE_OBSERVATIONS_SIZE_LIMIT_BYTES) {
-      const errorMessage = `Observations in trace are too large: ${(payloadSize / 1e6).toFixed(2)}MB exceeds limit of ${(env.LANGFUSE_API_TRACE_OBSERVATIONS_SIZE_LIMIT_BYTES / 1e6).toFixed(2)}MB`;
-
-      throw new Error(errorMessage);
+      throw new TraceObservationPayloadTooLargeError({
+        traceId,
+        observationCount: records.length,
+        estimatedBytes: payloadSize,
+        limitBytes: env.LANGFUSE_API_TRACE_OBSERVATIONS_SIZE_LIMIT_BYTES,
+      });
     }
   }
 

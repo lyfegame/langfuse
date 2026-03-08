@@ -75,10 +75,20 @@ export function withMiddlewares(handlers: Handlers) {
           if (error.httpCode >= 500 && error.httpCode < 600) {
             traceException(error);
           }
-          return res.status(error.httpCode).json({
+
+          const responseBody: Record<string, unknown> = {
             message: error.message,
             error: error.name,
-          });
+          };
+
+          if (
+            "details" in error &&
+            (error as { details?: unknown }).details !== undefined
+          ) {
+            responseBody.details = (error as { details?: unknown }).details;
+          }
+
+          return res.status(error.httpCode).json(responseBody);
         }
 
         // Handle ClickHouse resource errors
