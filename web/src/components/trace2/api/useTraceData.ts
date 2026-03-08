@@ -16,6 +16,7 @@ export function useTraceData({
       traceId,
       timestamp,
       projectId,
+      verbosity: "truncated",
     },
     {
       retry(failureCount, error) {

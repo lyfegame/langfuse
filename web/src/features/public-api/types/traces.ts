@@ -125,6 +125,14 @@ export const PostTracesV1Response = z.object({ id: z.string() });
 // GET /api/public/traces/{traceId}
 export const GetTraceV1Query = z.object({
   traceId: z.string(),
+  includeIO: z
+    .enum(["true", "false"])
+    .nullish()
+    .transform((v) => (v == null ? undefined : v === "true")),
+  includeObservationIO: z
+    .enum(["true", "false"])
+    .nullish()
+    .transform((v) => (v == null ? undefined : v === "true")),
 });
 export const GetTraceV1Response = APIExtendedTrace.extend({
   scores: z.array(APIScoreSchemaV1),

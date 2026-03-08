@@ -70,6 +70,7 @@ export function usePreviewData(
     {
       projectId,
       traceId: actualTraceId as string,
+      verbosity: "truncated",
     },
     {
       enabled: enabled && !!actualTraceId && isTraceEval,

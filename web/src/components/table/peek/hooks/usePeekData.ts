@@ -21,6 +21,7 @@ export const usePeekData = ({
       traceId: traceId as string,
       projectId,
       timestamp,
+      verbosity: "truncated",
     },
     {
       enabled: !!traceId && !isBetaEnabled,

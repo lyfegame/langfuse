@@ -32,6 +32,7 @@ export const usePeekRunsCompareData = ({
       traceId: traceId as string,
       projectId,
       timestamp,
+      verbosity: "truncated",
     },
     {
       enabled: !!traceId,

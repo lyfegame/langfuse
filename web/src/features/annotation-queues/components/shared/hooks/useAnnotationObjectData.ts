@@ -18,7 +18,7 @@ export const useAnnotationObjectData = (
   const traceId = item?.parentTraceId ?? item?.objectId;
 
   const traceQuery = api.traces.byIdWithObservationsAndScores.useQuery(
-    { traceId: traceId as string, projectId },
+    { traceId: traceId as string, projectId, verbosity: "truncated" },
     {
       enabled:
         !!item &&
