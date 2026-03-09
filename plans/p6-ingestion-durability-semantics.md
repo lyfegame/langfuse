@@ -1,6 +1,6 @@
 # P6: Ingestion Durability Semantics
 
-**Status**: Proposed
+**Status**: In Progress (`2026-03-09T22:05:11Z`)
 **Type**: Correctness + durability
 **Impact**: Make ingestion job success mean verified ClickHouse materialization instead of "queued for write".
 
@@ -23,6 +23,17 @@ That creates three correctness hazards:
 - **True drop on exhaustion** — the in-process writer still drops records after max attempts instead of writing them to a dead-letter queue.
 
 This is a semantics bug, not just a tuning bug. Raising timeouts or lowering concurrency can reduce the frequency, but they do not fix the contract.
+
+## Implementation Status (`2026-03-09T22:05:11Z`)
+
+The first production-oriented slice is now implemented in `lyfegame/langfuse#13`:
+
+- ingestion-critical ClickHouse writes (`traces`, `observations`, `scores`, `dataset_run_items_rmt`, `blob_storage_file_log`, staging rows) now use an awaited writer path instead of fire-and-forget buffering;
+- ambiguous timeout / network insert errors reconcile by querying ClickHouse for the expected record key and `event_ts` watermark before treating the write as failed;
+- the ingestion queue now writes the Redis `recently-processed` cache only after `mergeAndWrite()` and the awaited `blob_storage_file_log` side effect both succeed;
+- awaited writer failures now reject back to BullMQ instead of silently staying inside the in-memory writer retry loop.
+
+**Still open:** the generic fire-and-forget writer path can still drop records after max attempts. The remaining `Phase 6d` DLQ work is still required before calling the durability story fully complete.
 
 ## Design Goal
 

@@ -20,6 +20,17 @@ import { logger } from "@langfuse/shared/src/server";
 import { instrumentAsync } from "@langfuse/shared/src/server";
 import { backOff } from "exponential-backoff";
 
+class PartiallyVerifiedWriteError extends Error {
+  constructor(
+    public readonly originalError: Error,
+    public readonly verifiedRecordKeys: string[],
+  ) {
+    super(originalError.message);
+    this.name = "PartiallyVerifiedWriteError";
+    Object.setPrototypeOf(this, PartiallyVerifiedWriteError.prototype);
+  }
+}
+
 export class ClickhouseWriter {
   private static instance: ClickhouseWriter | null = null;
   private static client: ClickhouseClientType | null = null;
@@ -30,6 +41,7 @@ export class ClickhouseWriter {
 
   isIntervalFlushInProgress: boolean;
   intervalId: NodeJS.Timeout | null = null;
+  private flushChains: Partial<Record<TableName, Promise<void>>> = {};
 
   private constructor() {
     this.batchSize = env.LANGFUSE_INGESTION_CLICKHOUSE_WRITE_BATCH_SIZE;
@@ -107,19 +119,36 @@ export class ClickhouseWriter {
       async () => {
         recordIncrement("langfuse.queue.clickhouse_writer.request");
         await Promise.all([
-          this.flush(TableName.Traces, fullQueue),
-          this.flush(TableName.TracesNull, fullQueue),
-          this.flush(TableName.Scores, fullQueue),
-          this.flush(TableName.Observations, fullQueue),
-          this.flush(TableName.ObservationsBatchStaging, fullQueue),
-          this.flush(TableName.BlobStorageFileLog, fullQueue),
-          this.flush(TableName.DatasetRunItems, fullQueue),
-          this.flush(TableName.Events, fullQueue),
+          this.flushTable(TableName.Traces, fullQueue),
+          this.flushTable(TableName.TracesNull, fullQueue),
+          this.flushTable(TableName.Scores, fullQueue),
+          this.flushTable(TableName.Observations, fullQueue),
+          this.flushTable(TableName.ObservationsBatchStaging, fullQueue),
+          this.flushTable(TableName.BlobStorageFileLog, fullQueue),
+          this.flushTable(TableName.DatasetRunItems, fullQueue),
+          this.flushTable(TableName.Events, fullQueue),
         ]).catch((err) => {
           logger.error("ClickhouseWriter.flushAll", err);
         });
       },
     );
+  }
+
+  private flushTable<T extends TableName>(
+    tableName: T,
+    fullQueue = false,
+  ): Promise<void> {
+    const currentFlush = this.flushChains[tableName] ?? Promise.resolve();
+    const nextFlush = currentFlush
+      .catch(() => undefined)
+      .then(() => this.flush(tableName, fullQueue));
+    const trackedFlush = nextFlush.finally(() => {
+      if (this.flushChains[tableName] === trackedFlush) {
+        delete this.flushChains[tableName];
+      }
+    });
+    this.flushChains[tableName] = trackedFlush;
+    return trackedFlush;
   }
 
   private getRetryableErrorType(
@@ -335,6 +364,40 @@ export class ClickhouseWriter {
         {
           numOfAttempts: env.LANGFUSE_INGESTION_CLICKHOUSE_MAX_ATTEMPTS,
           retry: (error: Error, attemptNumber: number) => {
+            if (error instanceof PartiallyVerifiedWriteError) {
+              const verifiedRecordKeySet = new Set(error.verifiedRecordKeys);
+              const verifiedItems = queueItems.filter((item) =>
+                verifiedRecordKeySet.has(
+                  this.getRecordVerificationKey(tableName, item.data),
+                ),
+              );
+              const remainingItems = queueItems.filter(
+                (item) =>
+                  !verifiedRecordKeySet.has(
+                    this.getRecordVerificationKey(tableName, item.data),
+                  ),
+              );
+
+              verifiedItems.forEach((item) => item.resolve?.());
+              queueItems = remainingItems;
+              recordsToWrite = remainingItems.map((item) => item.data);
+
+              logger.warn(
+                `ClickHouse Writer verified ${verifiedItems.length} ${tableName} record(s) after an ambiguous write error and will retry ${remainingItems.length} unresolved record(s)`,
+                {
+                  attemptNumber,
+                  verifiedCount: verifiedItems.length,
+                  retryCount: remainingItems.length,
+                },
+              );
+              currentSpan?.addEvent("clickhouse-query-verified-subset", {
+                "retry.attempt": attemptNumber,
+                "write.verified_count": verifiedItems.length,
+                "write.retry_count": remainingItems.length,
+              });
+              return remainingItems.length > 0;
+            }
+
             const retryableErrorType = this.getRetryableErrorType(error);
             const isRetryable = retryableErrorType !== null;
             const isSizeError = this.isSizeError(error);
@@ -424,6 +487,8 @@ export class ClickhouseWriter {
         },
       );
 
+      queueItems.forEach((item) => item.resolve?.());
+
       // Log processing time
       recordHistogram(
         "langfuse.queue.clickhouse_writer.processing_time",
@@ -447,17 +512,21 @@ export class ClickhouseWriter {
       );
     } catch (err) {
       logger.error(`ClickhouseWriter.flush ${tableName}`, err);
+      const flushError = err instanceof Error ? err : new Error(String(err));
 
-      // Re-add the records to the queue with incremented attempts
       let droppedCount = 0;
       queueItems.forEach((item) => {
+        if (item.reject) {
+          item.reject(flushError);
+          return;
+        }
+
         if (item.attempts < this.maxAttempts) {
           entityQueue.push({
             ...item,
             attempts: item.attempts + 1,
           });
         } else {
-          // TODO - Add to a dead letter queue in Redis rather than dropping
           recordIncrement("langfuse.queue.clickhouse_writer.error");
           droppedCount++;
         }
@@ -475,30 +544,168 @@ export class ClickhouseWriter {
     tableName: T,
     data: RecordInsertType<T>,
   ) {
+    this.enqueueItem(tableName, data);
+  }
+
+  public addToQueueAndWait<T extends TableName>(
+    tableName: T,
+    data: RecordInsertType<T>,
+  ): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      this.enqueueItem(tableName, data, { resolve, reject });
+    });
+  }
+
+  private enqueueItem<T extends TableName>(
+    tableName: T,
+    data: RecordInsertType<T>,
+    callbacks?: Pick<ClickhouseWriterQueueItem<T>, "resolve" | "reject">,
+  ) {
     const entityQueue = this.queue[tableName];
     entityQueue.push({
       createdAt: Date.now(),
       attempts: 1,
       data,
+      ...callbacks,
     });
 
     if (entityQueue.length >= this.batchSize) {
       logger.debug(`Queue is full. Flushing ${tableName}...`);
 
-      this.flush(tableName).catch((err) => {
+      this.flushTable(tableName).catch((err) => {
         logger.error("ClickhouseWriter.addToQueue flush", err);
       });
     }
+  }
+
+  private getVerificationField(tableName: TableName): "id" | "event_id" {
+    return tableName === TableName.BlobStorageFileLog ? "event_id" : "id";
+  }
+
+  private getRecordVerificationKey<T extends TableName>(
+    tableName: T,
+    record: RecordInsertType<T>,
+  ): string {
+    return this.getVerificationField(tableName) === "event_id"
+      ? String((record as BlobStorageFileLogInsertType).event_id)
+      : String(record.id);
+  }
+
+  private getExpectedEventTimestampMs<T extends TableName>(
+    record: RecordInsertType<T>,
+  ): number {
+    const value = (record as { event_ts?: unknown }).event_ts;
+    if (typeof value === "number") return value;
+    if (typeof value === "string") {
+      const numericValue = Number(value);
+      if (Number.isFinite(numericValue)) return numericValue;
+      const parsedDate = new Date(value).getTime();
+      return Number.isFinite(parsedDate) ? parsedDate : 0;
+    }
+    if (value instanceof Date) return value.getTime();
+    return 0;
+  }
+
+  private shouldVerifyAfterError(error: Error): boolean {
+    const retryableErrorType = this.getRetryableErrorType(error);
+    return (
+      retryableErrorType === "network" ||
+      retryableErrorType === "clickhouse_timeout"
+    );
+  }
+
+  private async getVerifiedRecordKeys<T extends TableName>(params: {
+    table: T;
+    records: RecordInsertType<T>[];
+  }): Promise<string[]> {
+    if (params.records.length === 0) return [];
+
+    const verificationField = this.getVerificationField(params.table);
+    const client =
+      ClickhouseWriter.client ??
+      clickhouseClient({
+        request_timeout: env.LANGFUSE_INGESTION_CLICKHOUSE_REQUEST_TIMEOUT_MS,
+      });
+
+    const recordsByProject = new Map<string, RecordInsertType<T>[]>();
+    params.records.forEach((record) => {
+      const projectRecords = recordsByProject.get(record.project_id) ?? [];
+      projectRecords.push(record);
+      recordsByProject.set(record.project_id, projectRecords);
+    });
+
+    const verifiedKeys = new Set<string>();
+
+    for (const [projectId, projectRecords] of recordsByProject.entries()) {
+      const expectedEventTimestampMsByKey = new Map(
+        projectRecords.map((record) => [
+          this.getRecordVerificationKey(params.table, record),
+          this.getExpectedEventTimestampMs(record),
+        ]),
+      );
+      const recordKeys = [...expectedEventTimestampMsByKey.keys()];
+
+      const queryResult = await client.query({
+        query: `
+          SELECT
+            ${verificationField} AS verification_key,
+            toUnixTimestamp64Milli(max(event_ts)) AS max_event_ts_ms
+          FROM ${params.table}
+          WHERE project_id = {projectId: String}
+            AND ${verificationField} IN {recordKeys: Array(String)}
+          GROUP BY verification_key
+          SETTINGS use_query_cache = false
+        `,
+        format: "JSONEachRow",
+        query_params: {
+          projectId,
+          recordKeys,
+        },
+        clickhouse_settings: {
+          log_comment: JSON.stringify({
+            feature: "ingestion",
+            type: params.table,
+            operation_name: "verifyWriteToClickhouse",
+            projectId,
+          }),
+        },
+      });
+
+      const rows = (await queryResult.json()) as Array<{
+        verification_key: string;
+        max_event_ts_ms: number | string;
+      }>;
+
+      rows.forEach((row) => {
+        const expectedEventTimestampMs = expectedEventTimestampMsByKey.get(
+          row.verification_key,
+        );
+        if (expectedEventTimestampMs === undefined) return;
+
+        if (Number(row.max_event_ts_ms) >= expectedEventTimestampMs) {
+          verifiedKeys.add(row.verification_key);
+        }
+      });
+    }
+
+    return [...verifiedKeys];
   }
 
   private async writeToClickhouse<T extends TableName>(params: {
     table: T;
     records: RecordInsertType<T>[];
   }): Promise<void> {
-    const startTime = Date.now();
+    if (params.records.length === 0) return;
 
-    await (ClickhouseWriter.client ?? clickhouseClient())
-      .insert({
+    const startTime = Date.now();
+    const client =
+      ClickhouseWriter.client ??
+      clickhouseClient({
+        request_timeout: env.LANGFUSE_INGESTION_CLICKHOUSE_REQUEST_TIMEOUT_MS,
+      });
+
+    try {
+      await client.insert({
         table: params.table,
         format: "JSONEachRow",
         values: params.records,
@@ -513,12 +720,31 @@ export class ClickhouseWriter {
                 : undefined,
           }),
         },
-      })
-      .catch((err) => {
-        logger.error(`ClickhouseWriter.writeToClickhouse ${err}`);
-
-        throw err;
       });
+    } catch (err) {
+      const writeError = err instanceof Error ? err : new Error(String(err));
+
+      if (this.shouldVerifyAfterError(writeError)) {
+        const verifiedRecordKeys = await this.getVerifiedRecordKeys(params);
+        if (verifiedRecordKeys.length === params.records.length) {
+          logger.warn(
+            `ClickhouseWriter.writeToClickhouse recovered ${params.table} write after ambiguous error by verifying durable materialization`,
+            {
+              error: writeError.message,
+              verifiedCount: verifiedRecordKeys.length,
+            },
+          );
+          return;
+        }
+
+        if (verifiedRecordKeys.length > 0) {
+          throw new PartiallyVerifiedWriteError(writeError, verifiedRecordKeys);
+        }
+      }
+
+      logger.error(`ClickhouseWriter.writeToClickhouse ${writeError}`);
+      throw writeError;
+    }
 
     logger.debug(
       `ClickhouseWriter.writeToClickhouse: ${Date.now() - startTime} ms`,
@@ -565,4 +791,6 @@ type ClickhouseWriterQueueItem<T extends TableName> = {
   createdAt: number;
   attempts: number;
   data: RecordInsertType<T>;
+  resolve?: () => void;
+  reject?: (error: Error) => void;
 };

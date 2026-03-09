@@ -43,7 +43,7 @@ Four layers of isolation ensure workloads don't interfere:
 | **P3**: ClickHouse projections | **Dropped** | Doubles storage per table. Only worth it if UI latency is a proven problem — profile first. |
 | **P4**: Observability | **Done** | All logs structured, OTel histograms for export timing. Dashboards/alerting are ops tasks. |
 | **P5**: CI pipeline + fork hygiene | **Done** | CI activated on main. |
-| **P6**: Ingestion durability semantics | Proposed | Fix the semantics bug where BullMQ failure/success does not cleanly map to verified ClickHouse materialization. |
+| **P6**: Ingestion durability semantics | In Progress | Awaited critical writes, timeout reconciliation, and post-success dedupe are implemented; DLQ-on-exhaustion remains open. |
 
 ## Key Decisions
 

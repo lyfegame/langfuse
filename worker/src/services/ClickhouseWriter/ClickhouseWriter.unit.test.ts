@@ -31,6 +31,7 @@ vi.mock("../../env", async (importOriginal) => {
       LANGFUSE_INGESTION_CLICKHOUSE_WRITE_BATCH_SIZE: 100,
       LANGFUSE_INGESTION_CLICKHOUSE_WRITE_INTERVAL_MS: 5000,
       LANGFUSE_INGESTION_CLICKHOUSE_MAX_ATTEMPTS: 6,
+      LANGFUSE_INGESTION_CLICKHOUSE_REQUEST_TIMEOUT_MS: 60000,
       LANGFUSE_INGESTION_CLICKHOUSE_RETRY_INITIAL_DELAY_MS: 1000,
       LANGFUSE_INGESTION_CLICKHOUSE_RETRY_MAX_DELAY_MS: 5000,
       LANGFUSE_INGESTION_CLICKHOUSE_RETRY_TIME_MULTIPLE: 2,
@@ -40,6 +41,7 @@ vi.mock("../../env", async (importOriginal) => {
 
 const clickhouseClientMock = {
   insert: vi.fn(),
+  query: vi.fn(),
 };
 
 describe("ClickhouseWriter", () => {
@@ -185,6 +187,101 @@ describe("ClickhouseWriter", () => {
       writer["isRetryableError"](new Error("socket hang up")),
     ).toBe(true);
     expect(writer["isRetryableError"](new Error("Syntax error"))).toBe(false);
+  });
+
+  it("should resolve awaited writes after timeout if the records already committed", async () => {
+    const mockInsert = vi
+      .spyOn(clickhouseClientMock, "insert")
+      .mockRejectedValueOnce(new Error("Timeout error."));
+    const mockQuery = vi.spyOn(clickhouseClientMock, "query").mockResolvedValue({
+      query_id: "verify-query",
+      response_headers: { "x-clickhouse-summary": [] },
+      json: vi.fn().mockResolvedValue([
+        { verification_key: "trace-1", max_event_ts_ms: "1000" },
+      ]),
+    } as any);
+
+    const writePromise = writer.addToQueueAndWait(TableName.Traces, {
+      id: "trace-1",
+      project_id: "project-1",
+      event_ts: 1000,
+      name: "test",
+    } as any);
+
+    await vi.advanceTimersByTimeAsync(writer.writeInterval);
+
+    await expect(writePromise).resolves.toBeUndefined();
+    expect(mockInsert).toHaveBeenCalledTimes(1);
+    expect(mockQuery).toHaveBeenCalledTimes(1);
+    expect(writer["queue"][TableName.Traces]).toHaveLength(0);
+  });
+
+  it("should retry only unresolved records after partial timeout verification", async () => {
+    const mockInsert = vi
+      .spyOn(clickhouseClientMock, "insert")
+      .mockRejectedValueOnce(new Error("Timeout error."))
+      .mockResolvedValueOnce();
+    const mockQuery = vi.spyOn(clickhouseClientMock, "query").mockResolvedValue({
+      query_id: "verify-query",
+      response_headers: { "x-clickhouse-summary": [] },
+      json: vi.fn().mockResolvedValue([
+        { verification_key: "trace-1", max_event_ts_ms: "1000" },
+      ]),
+    } as any);
+
+    const firstWrite = writer.addToQueueAndWait(TableName.Traces, {
+      id: "trace-1",
+      project_id: "project-1",
+      event_ts: 1000,
+      name: "test-1",
+    } as any);
+    const secondWrite = writer.addToQueueAndWait(TableName.Traces, {
+      id: "trace-2",
+      project_id: "project-1",
+      event_ts: 1000,
+      name: "test-2",
+    } as any);
+
+    await vi.advanceTimersByTimeAsync(
+      writer.writeInterval +
+        env.LANGFUSE_INGESTION_CLICKHOUSE_RETRY_INITIAL_DELAY_MS +
+        100,
+    );
+
+    await expect(Promise.all([firstWrite, secondWrite])).resolves.toEqual([
+      undefined,
+      undefined,
+    ]);
+    expect(mockInsert).toHaveBeenCalledTimes(2);
+    expect(mockInsert.mock.calls[1][0].values).toEqual([
+      expect.objectContaining({ id: "trace-2" }),
+    ]);
+    expect(mockQuery).toHaveBeenCalledTimes(1);
+  });
+
+  it("should reject awaited writes after exhausting retries instead of dropping them", async () => {
+    const mockInsert = vi
+      .spyOn(clickhouseClientMock, "insert")
+      .mockRejectedValue(new Error("Timeout error."));
+    const mockQuery = vi.spyOn(clickhouseClientMock, "query").mockResolvedValue({
+      query_id: "verify-query",
+      response_headers: { "x-clickhouse-summary": [] },
+      json: vi.fn().mockResolvedValue([]),
+    } as any);
+
+    const writePromise = writer.addToQueueAndWait(TableName.Traces, {
+      id: "trace-1",
+      project_id: "project-1",
+      event_ts: 1000,
+      name: "test",
+    } as any);
+
+    await vi.advanceTimersByTimeAsync(30000);
+
+    await expect(writePromise).rejects.toThrow("Timeout error.");
+    expect(mockInsert).toHaveBeenCalled();
+    expect(mockQuery).toHaveBeenCalled();
+    expect(writer["queue"][TableName.Traces]).toHaveLength(0);
   });
 
   it("should retry transient ClickHouse overload within the same flush", async () => {
