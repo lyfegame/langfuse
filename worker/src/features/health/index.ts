@@ -22,8 +22,10 @@ import type {
 
 const READINESS_REDIS_TIMEOUT_MS = 2_000;
 const BULLMQ_HEALTH_STALE_MS = 2 * 60 * 1000;
+const BULLMQ_HEALTH_STARTUP_GRACE_MS = 90 * 1000;
 const BULLMQ_HEALTH_QUEUE_DEPTH_TIMEOUT_MS = 500;
 const BULLMQ_QUEUE_DEPTH_TIMEOUT_ERROR = "bullmq_queue_depth_timeout";
+const PROCESS_STARTED_AT = Date.now();
 
 export interface WorkerHealthResponse {
   status: string;
@@ -126,6 +128,20 @@ const getExpectedBullMqQueueNames = (): string[] => {
   return queueNames;
 };
 
+const latestTimestamp = (
+  ...timestamps: Array<number | null | undefined>
+): number | null => {
+  const validTimestamps = timestamps.filter(
+    (timestamp): timestamp is number => typeof timestamp === "number",
+  );
+
+  if (validTimestamps.length === 0) {
+    return null;
+  }
+
+  return Math.max(...validTimestamps);
+};
+
 const getQueueForHealth = (queueName: string): Queue | null => {
   if (queueName.startsWith(QueueName.IngestionQueue)) {
     return IngestionQueue.getInstance({ shardName: queueName });
@@ -146,7 +162,26 @@ const buildBullMqQueueRuntimeSnapshot = async (
   queueName: string,
   workerSnapshot: WorkerHealthSnapshot | null,
 ): Promise<BullMqQueueRuntimeSnapshot> => {
+  const now = Date.now();
+
   if (!workerSnapshot) {
+    if (now - PROCESS_STARTED_AT <= BULLMQ_HEALTH_STARTUP_GRACE_MS) {
+      return {
+        queueName,
+        isRegistered: true,
+        isRunning: true,
+        registeredAt: PROCESS_STARTED_AT,
+        lastReadyAt: null,
+        lastActivityAt: null,
+        lastCompletedAt: null,
+        lastFailedAt: null,
+        lastErrorAt: null,
+        lastClosedAt: null,
+        waitingCount: null,
+        waitingCountSource: "skipped",
+      };
+    }
+
     return {
       queueName,
       isRegistered: false,
@@ -163,7 +198,18 @@ const buildBullMqQueueRuntimeSnapshot = async (
     };
   }
 
-  const { waitingCount, waitingCountSource } = await getQueueWaitingCount(queueName);
+  const lastProgressAt = latestTimestamp(
+    workerSnapshot.lastActivityAt,
+    workerSnapshot.lastCompletedAt,
+    workerSnapshot.lastFailedAt,
+    workerSnapshot.lastReadyAt,
+    workerSnapshot.registeredAt,
+  );
+  const shouldCheckQueueDepth =
+    lastProgressAt === null || now - lastProgressAt > BULLMQ_HEALTH_STALE_MS;
+  const { waitingCount, waitingCountSource } = shouldCheckQueueDepth
+    ? await getQueueWaitingCount(queueName)
+    : { waitingCount: null, waitingCountSource: "skipped" as const };
 
   return {
     queueName,
