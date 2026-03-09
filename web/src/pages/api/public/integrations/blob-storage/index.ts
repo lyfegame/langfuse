@@ -5,6 +5,7 @@ import { redis } from "@langfuse/shared/src/server";
 import { type NextApiRequest, type NextApiResponse } from "next";
 import { hasEntitlementBasedOnPlan } from "@/src/features/entitlements/server/hasEntitlement";
 import {
+  BlobStorageExportFrequency,
   CreateBlobStorageIntegrationRequest,
   type BlobStorageIntegrationResponseType,
 } from "@/src/features/public-api/types/blob-storage-integrations";
@@ -79,7 +80,9 @@ async function handleGetBlobStorageIntegrations(
       region: integration.region,
       accessKeyId: integration.accessKeyId,
       prefix: integration.prefix,
-      exportFrequency: integration.exportFrequency,
+      exportFrequency: BlobStorageExportFrequency.parse(
+        integration.exportFrequency,
+      ),
       enabled: integration.enabled,
       forcePathStyle: integration.forcePathStyle,
       fileType: integration.fileType,
@@ -181,7 +184,9 @@ async function handleUpsertBlobStorageIntegration(
     region: integration.region,
     accessKeyId: integration.accessKeyId,
     prefix: integration.prefix,
-    exportFrequency: integration.exportFrequency,
+    exportFrequency: BlobStorageExportFrequency.parse(
+      integration.exportFrequency,
+    ),
     enabled: integration.enabled,
     forcePathStyle: integration.forcePathStyle,
     fileType: integration.fileType,
