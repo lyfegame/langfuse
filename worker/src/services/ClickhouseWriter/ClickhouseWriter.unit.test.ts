@@ -30,7 +30,10 @@ vi.mock("../../env", async (importOriginal) => {
     env: {
       LANGFUSE_INGESTION_CLICKHOUSE_WRITE_BATCH_SIZE: 100,
       LANGFUSE_INGESTION_CLICKHOUSE_WRITE_INTERVAL_MS: 5000,
-      LANGFUSE_INGESTION_CLICKHOUSE_MAX_ATTEMPTS: 3,
+      LANGFUSE_INGESTION_CLICKHOUSE_MAX_ATTEMPTS: 6,
+      LANGFUSE_INGESTION_CLICKHOUSE_RETRY_INITIAL_DELAY_MS: 1000,
+      LANGFUSE_INGESTION_CLICKHOUSE_RETRY_MAX_DELAY_MS: 5000,
+      LANGFUSE_INGESTION_CLICKHOUSE_RETRY_TIME_MULTIPLE: 2,
     },
   };
 });
@@ -164,6 +167,62 @@ describe("ClickhouseWriter", () => {
     expect(writer["intervalId"]).toBeNull();
     expect(logger.info).toHaveBeenCalledWith(
       "ClickhouseWriter shutdown complete.",
+    );
+  });
+
+  it("should classify transient ClickHouse overload errors as retryable", () => {
+    expect(
+      writer["isRetryableError"](
+        new Error(
+          "Too many simultaneous queries for user langfuse_ingestion. Current: 100, maximum: 100.",
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      writer["isRetryableError"](new Error("Timeout error.")),
+    ).toBe(true);
+    expect(
+      writer["isRetryableError"](new Error("socket hang up")),
+    ).toBe(true);
+    expect(writer["isRetryableError"](new Error("Syntax error"))).toBe(false);
+  });
+
+  it("should retry transient ClickHouse overload within the same flush", async () => {
+    const mockInsert = vi
+      .spyOn(clickhouseClientMock, "insert")
+      .mockRejectedValueOnce(
+        new Error(
+          "Too many simultaneous queries for user langfuse_ingestion. Current: 100, maximum: 100.",
+        ),
+      )
+      .mockRejectedValueOnce(new Error("Timeout error."))
+      .mockResolvedValueOnce();
+
+    writer.addToQueue(TableName.BlobStorageFileLog, {
+      id: "1",
+      project_id: "project-1",
+      entity_type: "trace",
+      entity_id: "trace-1",
+      event_id: "event-1",
+      bucket_name: "bucket",
+      bucket_path: "path",
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      event_ts: new Date().toISOString(),
+      is_deleted: 0,
+    } as any);
+
+    await vi.advanceTimersByTimeAsync(writer.writeInterval + 3000);
+
+    expect(mockInsert).toHaveBeenCalledTimes(3);
+    expect(writer["queue"][TableName.BlobStorageFileLog]).toHaveLength(0);
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining("retryable error"),
+      expect.objectContaining({ retryableErrorType: "clickhouse_concurrency" }),
+    );
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining("retryable error"),
+      expect.objectContaining({ retryableErrorType: "clickhouse_timeout" }),
     );
   });
 

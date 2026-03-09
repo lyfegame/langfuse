@@ -122,13 +122,41 @@ export class ClickhouseWriter {
     );
   }
 
-  private isRetryableError(error: unknown): boolean {
-    if (!error || typeof error !== "object") return false;
+  private getRetryableErrorType(
+    error: unknown,
+  ): "network" | "clickhouse_timeout" | "clickhouse_concurrency" | null {
+    if (!error || typeof error !== "object") return null;
 
     const errorMessage = (error as Error).message?.toLowerCase() || "";
 
-    // Check for socket hang up and other network-related errors
-    return errorMessage.includes("socket hang up");
+    if (
+      [
+        "socket hang up",
+        "econnreset",
+        "connection reset",
+        "connection terminated",
+        "connection closed",
+        "read econnreset",
+        "write epipe",
+        "broken pipe",
+      ].some((pattern) => errorMessage.includes(pattern))
+    ) {
+      return "network";
+    }
+
+    if (errorMessage.includes("too many simultaneous queries")) {
+      return "clickhouse_concurrency";
+    }
+
+    if (errorMessage.includes("timeout error")) {
+      return "clickhouse_timeout";
+    }
+
+    return null;
+  }
+
+  private isRetryableError(error: unknown): boolean {
+    return this.getRetryableErrorType(error) !== null;
   }
 
   private isSizeError(error: unknown): boolean {
@@ -307,7 +335,8 @@ export class ClickhouseWriter {
         {
           numOfAttempts: env.LANGFUSE_INGESTION_CLICKHOUSE_MAX_ATTEMPTS,
           retry: (error: Error, attemptNumber: number) => {
-            const isRetryable = this.isRetryableError(error);
+            const retryableErrorType = this.getRetryableErrorType(error);
+            const isRetryable = retryableErrorType !== null;
             const isSizeError = this.isSizeError(error);
             const isStringLengthError = this.isStringLengthError(error);
 
@@ -317,11 +346,13 @@ export class ClickhouseWriter {
                 {
                   error: error.message,
                   attemptNumber,
+                  retryableErrorType,
                 },
               );
               currentSpan?.addEvent("clickhouse-query-retry", {
                 "retry.attempt": attemptNumber,
                 "retry.error": error.message,
+                "retry.error_type": retryableErrorType,
               });
               return true;
             } else if (isStringLengthError) {
@@ -386,9 +417,11 @@ export class ClickhouseWriter {
               return false;
             }
           },
-          startingDelay: 100,
-          timeMultiple: 1,
-          maxDelay: 100,
+          startingDelay:
+            env.LANGFUSE_INGESTION_CLICKHOUSE_RETRY_INITIAL_DELAY_MS,
+          timeMultiple:
+            env.LANGFUSE_INGESTION_CLICKHOUSE_RETRY_TIME_MULTIPLE,
+          maxDelay: env.LANGFUSE_INGESTION_CLICKHOUSE_RETRY_MAX_DELAY_MS,
         },
       );
 
