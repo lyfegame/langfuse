@@ -417,10 +417,8 @@ export class ClickhouseWriter {
               return false;
             }
           },
-          startingDelay:
-            env.LANGFUSE_INGESTION_CLICKHOUSE_RETRY_INITIAL_DELAY_MS,
-          timeMultiple:
-            env.LANGFUSE_INGESTION_CLICKHOUSE_RETRY_TIME_MULTIPLE,
+          startingDelay: env.LANGFUSE_INGESTION_CLICKHOUSE_RETRY_INITIAL_DELAY_MS,
+          timeMultiple: env.LANGFUSE_INGESTION_CLICKHOUSE_RETRY_TIME_MULTIPLE,
           maxDelay: env.LANGFUSE_INGESTION_CLICKHOUSE_RETRY_MAX_DELAY_MS,
         },
       );
