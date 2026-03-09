@@ -20,7 +20,7 @@ export const blobStorageIntegrationFormSchema = z.object({
     })
     .optional()
     .or(z.literal("")),
-  exportFrequency: z.enum(["hourly", "daily", "weekly"]),
+  exportFrequency: z.enum(["15m", "hourly", "daily", "weekly"]),
   enabled: z.boolean(),
   forcePathStyle: z.boolean(),
   fileType: z

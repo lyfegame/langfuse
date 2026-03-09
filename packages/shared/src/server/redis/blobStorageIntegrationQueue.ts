@@ -47,7 +47,7 @@ export class BlobStorageIntegrationQueue {
           QueueJobs.BlobStorageIntegrationJob,
           {},
           {
-            repeat: { pattern: "20 * * * *" }, // every hour at 20 minutes past
+            repeat: { pattern: "* * * * *" }, // every minute; due work is gated by nextSyncAt
           },
         )
         .catch((err) => {

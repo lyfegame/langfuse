@@ -190,6 +190,7 @@ const BlobStorageIntegrationSettingsForm = ({
       secretAccessKey: state?.secretAccessKey || null,
       prefix: state?.prefix || "",
       exportFrequency: (state?.exportFrequency || "daily") as
+        | "15m"
         | "daily"
         | "weekly"
         | "hourly",
@@ -218,6 +219,7 @@ const BlobStorageIntegrationSettingsForm = ({
       secretAccessKey: state?.secretAccessKey || null,
       prefix: state?.prefix || "",
       exportFrequency: (state?.exportFrequency || "daily") as
+        | "15m"
         | "daily"
         | "weekly"
         | "hourly",
@@ -513,6 +515,7 @@ const BlobStorageIntegrationSettingsForm = ({
                     <SelectValue placeholder="Select frequency" />
                   </SelectTrigger>
                   <SelectContent>
+                    <SelectItem value="15m">Every 15 minutes</SelectItem>
                     <SelectItem value="hourly">Hourly</SelectItem>
                     <SelectItem value="daily">Daily</SelectItem>
                     <SelectItem value="weekly">Weekly</SelectItem>

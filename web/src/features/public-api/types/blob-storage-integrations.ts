@@ -18,6 +18,13 @@ export const BlobStorageExportMode = z.enum([
   "FROM_CUSTOM_DATE",
 ]);
 
+export const BlobStorageExportFrequency = z.enum([
+  "15m",
+  "hourly",
+  "daily",
+  "weekly",
+]);
+
 /**
  * Request/Response Types
  */
@@ -39,7 +46,7 @@ export const CreateBlobStorageIntegrationRequest = z
         (value) => value === "" || value.endsWith("/"),
         "Prefix must be empty or end with a forward slash",
       ),
-    exportFrequency: z.string(),
+    exportFrequency: BlobStorageExportFrequency,
     enabled: z.boolean(),
     forcePathStyle: z.boolean(),
     fileType: BlobStorageIntegrationFileType,
@@ -68,7 +75,7 @@ export const BlobStorageIntegrationResponse = z
     region: z.string(),
     accessKeyId: z.string().nullable(),
     prefix: z.string(),
-    exportFrequency: z.string(),
+    exportFrequency: BlobStorageExportFrequency,
     enabled: z.boolean(),
     forcePathStyle: z.boolean(),
     fileType: BlobStorageIntegrationFileType,
