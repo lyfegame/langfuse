@@ -559,8 +559,8 @@ export class IngestionService {
 
     await Promise.all(
       finalDatasetRunItemRecords
-        .filter(
-          (record): record is NonNullable<typeof record> => Boolean(record),
+        .filter((record): record is NonNullable<typeof record> =>
+          Boolean(record),
         )
         .map((record) =>
           this.clickHouseWriter.addToQueueAndWait(
