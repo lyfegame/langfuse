@@ -13,6 +13,8 @@ import {
   TraceNullRecordInsertType,
   DatasetRunItemRecordInsertType,
   EventRecordInsertType,
+  ClickhouseWriterDlqQueue,
+  QueueJobs,
 } from "@langfuse/shared/src/server";
 
 import { env } from "../../env";
@@ -514,7 +516,7 @@ export class ClickhouseWriter {
       logger.error(`ClickhouseWriter.flush ${tableName}`, err);
       const flushError = err instanceof Error ? err : new Error(String(err));
 
-      let droppedCount = 0;
+      const dlqItems: ClickhouseWriterQueueItem<T>[] = [];
       queueItems.forEach((item) => {
         if (item.reject) {
           item.reject(flushError);
@@ -528,14 +530,12 @@ export class ClickhouseWriter {
           });
         } else {
           recordIncrement("langfuse.queue.clickhouse_writer.error");
-          droppedCount++;
+          dlqItems.push(item);
         }
       });
 
-      if (droppedCount > 0) {
-        logger.error(
-          `ClickhouseWriter: Max attempts reached, dropped ${droppedCount} ${tableName} record(s)`,
-        );
+      if (dlqItems.length > 0) {
+        await this.enqueueFailedItemsToDlq(tableName, dlqItems, flushError);
       }
     }
   }
@@ -576,6 +576,76 @@ export class ClickhouseWriter {
         logger.error("ClickhouseWriter.addToQueue flush", err);
       });
     }
+  }
+
+  private async enqueueFailedItemsToDlq<T extends TableName>(
+    tableName: T,
+    queueItems: ClickhouseWriterQueueItem<T>[],
+    error: Error,
+  ): Promise<void> {
+    const dlqQueue = ClickhouseWriterDlqQueue.getInstance();
+
+    if (!dlqQueue) {
+      logger.error(
+        `ClickhouseWriter: Max attempts reached and DLQ queue is unavailable for ${queueItems.length} ${tableName} record(s)`,
+      );
+      return;
+    }
+
+    const enqueueResults = await Promise.allSettled(
+      queueItems.map((item) =>
+        dlqQueue.add(
+          QueueJobs.ClickhouseWriterDlqJob,
+          {
+            timestamp: new Date(),
+            id: `${tableName}:${this.getRecordVerificationKey(tableName, item.data)}`,
+            payload: {
+              tableName,
+              projectId: this.getRecordProjectId(item.data),
+              record: item.data as Record<string, unknown>,
+              errorMessage: error.message,
+              originalAttempts: item.attempts,
+              originalCreatedAt: new Date(item.createdAt),
+              verificationKey: this.getRecordVerificationKey(tableName, item.data),
+            },
+            name: QueueJobs.ClickhouseWriterDlqJob,
+          },
+          {
+            jobId: `${tableName}:${this.getRecordVerificationKey(tableName, item.data)}:${item.createdAt}`,
+          },
+        ),
+      ),
+    );
+
+    const failedEnqueues = enqueueResults.filter(
+      (result): result is PromiseRejectedResult => result.status === "rejected",
+    );
+
+    enqueueResults.forEach((result) => {
+      if (result.status === "fulfilled") {
+        recordIncrement("langfuse.queue.clickhouse_writer.dlq_enqueued");
+      }
+    });
+
+    logger.error(
+      `ClickhouseWriter: Max attempts reached, enqueued ${queueItems.length - failedEnqueues.length}/${queueItems.length} ${tableName} record(s) to DLQ`,
+      failedEnqueues.length > 0
+        ? {
+            dlqEnqueueFailures: failedEnqueues.map((failed) =>
+              failed.reason instanceof Error
+                ? failed.reason.message
+                : String(failed.reason),
+            ),
+          }
+        : undefined,
+    );
+  }
+
+  private getRecordProjectId<T extends TableName>(
+    record: RecordInsertType<T>,
+  ): string | undefined {
+    const projectId = (record as { project_id?: unknown }).project_id;
+    return typeof projectId === "string" ? projectId : undefined;
   }
 
   private getVerificationField(tableName: TableName): "id" | "event_id" {

@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import * as serverExports from "@langfuse/shared/src/server";
 
+const clickhouseWriterDlqAddMock = vi.fn();
+
 import { env } from "../../env";
 import { logger } from "@langfuse/shared/src/server";
 import { ClickhouseWriter, TableName } from "../ClickhouseWriter";
@@ -19,6 +21,11 @@ vi.mock("@langfuse/shared/src/server", async (importOriginal) => {
       debug: vi.fn(),
       warn: vi.fn(),
       error: vi.fn(),
+    },
+    ClickhouseWriterDlqQueue: {
+      getInstance: vi.fn(() => ({
+        add: clickhouseWriterDlqAddMock,
+      })),
     },
   };
 });
@@ -135,12 +142,17 @@ describe("ClickhouseWriter", () => {
     expect(writer["queue"][TableName.Traces]).toHaveLength(0);
   });
 
-  it("should drop records after max attempts", async () => {
+  it("should enqueue non-awaited records to the DLQ after max attempts", async () => {
     const mockInsert = vi
       .spyOn(clickhouseClientMock, "insert")
       .mockRejectedValue(new Error("DB Error"));
+    clickhouseWriterDlqAddMock.mockResolvedValue(undefined);
 
-    writer.addToQueue(TableName.Traces, { id: "1", name: "test" });
+    writer.addToQueue(TableName.Traces, {
+      id: "1",
+      name: "test",
+      project_id: "project-1",
+    } as any);
 
     for (let i = 0; i < writer.maxAttempts; i++) {
       await vi.advanceTimersByTimeAsync(writer.writeInterval);
@@ -149,9 +161,23 @@ describe("ClickhouseWriter", () => {
     await vi.advanceTimersByTimeAsync(writer.writeInterval);
 
     expect(mockInsert).toHaveBeenCalledTimes(writer.maxAttempts);
+    expect(clickhouseWriterDlqAddMock).toHaveBeenCalledWith(
+      serverExports.QueueJobs.ClickhouseWriterDlqJob,
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          tableName: TableName.Traces,
+          projectId: "project-1",
+          verificationKey: "1",
+          originalAttempts: writer.maxAttempts,
+        }),
+      }),
+      expect.objectContaining({
+        jobId: expect.stringContaining("traces:1:"),
+      }),
+    );
     expect(
       logger.error.mock.calls.some((call) =>
-        call[0].includes("Max attempts reached"),
+        call[0].includes("Max attempts reached, enqueued"),
       ),
     ).toBe(true);
     expect(writer["queue"][TableName.Traces]).toHaveLength(0);

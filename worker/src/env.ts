@@ -102,6 +102,10 @@ const EnvSchema = z.object({
     .number()
     .positive()
     .default(60_000),
+  LANGFUSE_CLICKHOUSE_WRITER_DLQ_PROCESSING_CONCURRENCY: z.coerce
+    .number()
+    .positive()
+    .default(1),
   LANGFUSE_INGESTION_CLICKHOUSE_RETRY_INITIAL_DELAY_MS: z.coerce
     .number()
     .positive()
@@ -266,6 +270,9 @@ const EnvSchema = z.object({
   QUEUE_CONSUMER_DEAD_LETTER_RETRY_QUEUE_IS_ENABLED: z
     .enum(["true", "false"])
     .default("false"),
+  QUEUE_CONSUMER_CLICKHOUSE_WRITER_DLQ_QUEUE_IS_ENABLED: z
+    .enum(["true", "false"])
+    .default("true"),
   QUEUE_CONSUMER_WEBHOOK_QUEUE_IS_ENABLED: z
     .enum(["true", "false"])
     .default("true"),
