@@ -1,10 +1,7 @@
 import express from "express";
 import { logger, traceException } from "@langfuse/shared/src/server";
 
-import {
-  checkBullMqHealth,
-  checkContainerReadiness,
-} from "../features/health";
+import { checkBullMqHealth, checkContainerReadiness } from "../features/health";
 import type { WorkerHealthResponse } from "../features/health";
 
 const router = express.Router();
