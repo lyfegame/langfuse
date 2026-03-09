@@ -864,6 +864,62 @@ describe("BlobStorageIntegrationProcessingJob", () => {
       expect(timeDiff).toBeLessThan(5000); // Within 5 seconds
     });
 
+    it("should schedule 15m exports normally when caught up", async () => {
+      const { projectId } = await createOrgProjectAndApiKey();
+      s3Prefix = projectId;
+      const now = new Date();
+      const fifteenMinutesAgo = new Date(now.getTime() - 15 * 60 * 1000);
+
+      const trace = createTrace({
+        project_id: projectId,
+        timestamp: now.getTime() - 35 * 60 * 1000,
+        name: "Recent Trace",
+      });
+      await createTracesCh([trace]);
+
+      await prisma.blobStorageIntegration.create({
+        data: {
+          projectId,
+          type: BlobStorageIntegrationType.S3,
+          bucketName,
+          prefix: s3Prefix,
+          accessKeyId: minioAccessKeyId,
+          secretAccessKey: encrypt(minioAccessKeySecret),
+          region: region ? region : "auto",
+          endpoint: minioEndpoint,
+          forcePathStyle:
+            env.LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE === "true",
+          enabled: true,
+          exportFrequency: "15m",
+          lastSyncAt: fifteenMinutesAgo,
+        },
+      });
+
+      await handleBlobStorageIntegrationProjectJob({
+        data: { payload: { projectId } },
+      } as Job);
+
+      const updatedIntegration = await prisma.blobStorageIntegration.findUnique({
+        where: { projectId },
+      });
+
+      expect(updatedIntegration).toBeDefined();
+      if (!updatedIntegration?.nextSyncAt || !updatedIntegration?.lastSyncAt) {
+        expect.fail("nextSyncAt and lastSyncAt should be set");
+      }
+
+      const expectedNextSync = new Date(
+        updatedIntegration.lastSyncAt.getTime() + 15 * 60 * 1000,
+      );
+      const tolerance = 1000;
+
+      expect(
+        Math.abs(
+          updatedIntegration.nextSyncAt.getTime() - expectedNextSync.getTime(),
+        ),
+      ).toBeLessThan(tolerance);
+    });
+
     it("should schedule normally when caught up", async () => {
       const { projectId } = await createOrgProjectAndApiKey();
       s3Prefix = projectId;

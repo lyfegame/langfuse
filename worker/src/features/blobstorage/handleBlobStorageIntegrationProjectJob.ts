@@ -124,6 +124,8 @@ const getMinTimestampForExport = async (
  */
 const getFrequencyIntervalMs = (frequency: string): number => {
   switch (frequency) {
+    case "15m":
+      return 15 * 60 * 1000; // 15 minutes
     case "hourly":
       return 60 * 60 * 1000; // 1 hour
     case "daily":

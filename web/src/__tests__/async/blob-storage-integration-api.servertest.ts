@@ -23,7 +23,7 @@ const BlobStorageIntegrationResponseSchema = z.object({
   region: z.string(),
   accessKeyId: z.string().nullable(),
   prefix: z.string(),
-  exportFrequency: z.enum(["hourly", "daily", "weekly"]),
+  exportFrequency: z.enum(["15m", "hourly", "daily", "weekly"]),
   enabled: z.boolean(),
   forcePathStyle: z.boolean(),
   fileType: z.enum(["JSON", "CSV", "JSONL"]),
@@ -276,6 +276,24 @@ describe("Blob Storage Integrations API", () => {
       });
       expect(savedIntegration).toBeDefined();
       expect(savedIntegration?.bucketName).toBe("test-bucket");
+    });
+
+    it("should accept 15m export frequency", async () => {
+      const response = await makeZodVerifiedAPICall(
+        BlobStorageIntegrationResponseSchema,
+        "PUT",
+        "/api/public/integrations/blob-storage",
+        {
+          ...validBlobStorageConfig,
+          projectId: testProject1Id,
+          exportFrequency: "15m" as const,
+        },
+        createBasicAuthHeader(testApiKey, testApiSecretKey),
+        200,
+      );
+
+      expect(response.status).toBe(200);
+      expect(response.body.exportFrequency).toBe("15m");
     });
 
     it("should update an existing blob storage integration", async () => {
