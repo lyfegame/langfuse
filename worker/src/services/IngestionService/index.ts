@@ -559,7 +559,10 @@ export class IngestionService {
 
     await Promise.all(
       finalDatasetRunItemRecords
-        .filter((record): record is NonNullable<typeof record> => Boolean(record))
+        .filter(
+          (record): record is NonNullable<typeof record> =>
+            Boolean(record),
+        )
         .map((record) =>
           this.clickHouseWriter.addToQueueAndWait(
             TableName.DatasetRunItems,
@@ -751,7 +754,10 @@ export class IngestionService {
     finalTraceRecord.output = finalIO.output ?? clickhouseTraceRecord?.output;
 
     const clickhouseWritePromises = [
-      this.clickHouseWriter.addToQueueAndWait(TableName.Traces, finalTraceRecord),
+      this.clickHouseWriter.addToQueueAndWait(
+        TableName.Traces,
+        finalTraceRecord,
+      ),
     ];
 
     // Dual-write to staging table for batch propagation to events table
