@@ -97,7 +97,19 @@ const EnvSchema = z.object({
   LANGFUSE_INGESTION_CLICKHOUSE_MAX_ATTEMPTS: z.coerce
     .number()
     .positive()
-    .default(3),
+    .default(6),
+  LANGFUSE_INGESTION_CLICKHOUSE_RETRY_INITIAL_DELAY_MS: z.coerce
+    .number()
+    .positive()
+    .default(1000),
+  LANGFUSE_INGESTION_CLICKHOUSE_RETRY_MAX_DELAY_MS: z.coerce
+    .number()
+    .positive()
+    .default(5000),
+  LANGFUSE_INGESTION_CLICKHOUSE_RETRY_TIME_MULTIPLE: z.coerce
+    .number()
+    .positive()
+    .default(2),
 
   LANGFUSE_USE_AZURE_BLOB: z.enum(["true", "false"]).default("false"),
 
