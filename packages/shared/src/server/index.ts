@@ -79,6 +79,7 @@ export * from "./webhooks/ipBlocking";
 export * from "./webhooks/redirectHandler";
 export * from "./redis/experimentCreateQueue";
 export * from "./redis/dlqRetryQueue";
+export * from "./redis/clickhouseWriterDlqQueue";
 export * from "./redis/entityChangeQueue";
 export * from "./redis/eventPropagationQueue";
 export * from "./redis/otelProjectTracking";

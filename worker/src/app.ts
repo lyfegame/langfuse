@@ -32,6 +32,7 @@ import {
   logger,
   BlobStorageIntegrationQueue,
   DeadLetterRetryQueue,
+  ClickhouseWriterDlqQueue,
   IngestionQueue,
   OtelIngestionQueue,
   TraceUpsertQueue,
@@ -73,6 +74,7 @@ import { datasetDeleteProcessor } from "./queues/datasetDelete";
 import { otelIngestionQueueProcessor } from "./queues/otelIngestionQueue";
 import { eventPropagationProcessor } from "./queues/eventPropagationQueue";
 import { notificationQueueProcessor } from "./queues/notificationQueue";
+import { clickhouseWriterDlqProcessor } from "./queues/clickhouseWriterDlqQueue";
 import {
   BatchProjectCleaner,
   BATCH_DELETION_TABLES,
@@ -585,6 +587,21 @@ if (
     DlqRetryService.retryDeadLetterQueue,
     {
       concurrency: 1,
+    },
+  );
+}
+
+if (
+  isIngestion &&
+  env.QUEUE_CONSUMER_CLICKHOUSE_WRITER_DLQ_QUEUE_IS_ENABLED === "true"
+) {
+  ClickhouseWriterDlqQueue.getInstance();
+
+  WorkerManager.register(
+    QueueName.ClickhouseWriterDlqQueue,
+    clickhouseWriterDlqProcessor,
+    {
+      concurrency: env.LANGFUSE_CLICKHOUSE_WRITER_DLQ_PROCESSING_CONCURRENCY,
     },
   );
 }

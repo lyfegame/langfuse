@@ -12,6 +12,7 @@ export class DlqRetryService {
     QueueName.ScoreDelete,
     QueueName.BatchActionQueue,
     QueueName.DataRetentionProcessingQueue,
+    QueueName.ClickhouseWriterDlqQueue,
   ] as const;
 
   // called each 10 minutes, defined by the bull cron job
@@ -37,7 +38,7 @@ export class DlqRetryService {
       );
       for (const job of failedJobs) {
         try {
-          const projectId = job.data.payload.projectId;
+          const projectId = job.data.payload.projectId ?? "unknown";
           const ts = job.data.timestamp;
 
           const dlxDelay = Date.now() - ts;

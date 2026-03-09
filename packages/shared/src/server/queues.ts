@@ -220,6 +220,25 @@ export const DeadLetterRetryQueueEventSchema = z.object({
   timestamp: z.date(),
 });
 
+export const ClickhouseWriterDlqQueueEventSchema = z.object({
+  tableName: z.enum([
+    "traces",
+    "traces_null",
+    "scores",
+    "observations",
+    "observations_batch_staging",
+    "blob_storage_file_log",
+    "dataset_run_items_rmt",
+    "events",
+  ]),
+  projectId: z.string().optional(),
+  record: z.record(z.string(), z.any()),
+  errorMessage: z.string(),
+  originalAttempts: z.number().int().nonnegative(),
+  originalCreatedAt: z.date(),
+  verificationKey: z.string(),
+});
+
 export const NotificationEventSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("COMMENT_MENTION"),
@@ -296,6 +315,9 @@ export type BlobStorageIntegrationProcessingEventType = z.infer<
 export type DeadLetterRetryQueueEventType = z.infer<
   typeof DeadLetterRetryQueueEventSchema
 >;
+export type ClickhouseWriterDlqQueueEventType = z.infer<
+  typeof ClickhouseWriterDlqQueueEventSchema
+>;
 export type NotificationEventType = z.infer<typeof NotificationEventSchema>;
 
 export const RetryBaggage = z.object({
@@ -335,6 +357,7 @@ export enum QueueName {
   ScoreDelete = "score-delete",
   DatasetDelete = "dataset-delete-queue",
   DeadLetterRetryQueue = "dead-letter-retry-queue",
+  ClickhouseWriterDlqQueue = "clickhouse-writer-dlq-queue",
   WebhookQueue = "webhook-queue",
   EntityChangeQueue = "entity-change-queue",
   EventPropagationQueue = "event-propagation-queue",
@@ -371,6 +394,7 @@ export enum QueueJobs {
   ScoreDelete = "score-delete",
   DatasetDelete = "dataset-delete-job",
   DeadLetterRetryJob = "dead-letter-retry-job",
+  ClickhouseWriterDlqJob = "clickhouse-writer-dlq-job",
   WebhookJob = "webhook-job",
   EntityChangeJob = "entity-change-job",
   EventPropagationJob = "event-propagation-job",
@@ -501,6 +525,12 @@ export type TQueueJobTypes = {
     id: string;
     payload: DeadLetterRetryQueueEventType;
     name: QueueJobs.DeadLetterRetryJob;
+  };
+  [QueueName.ClickhouseWriterDlqQueue]: {
+    timestamp: Date;
+    id: string;
+    payload: ClickhouseWriterDlqQueueEventType;
+    name: QueueJobs.ClickhouseWriterDlqJob;
   };
   [QueueName.WebhookQueue]: {
     timestamp: Date;
