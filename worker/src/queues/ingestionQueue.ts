@@ -56,29 +56,9 @@ export const ingestionQueueProcessorBuilder = (
         );
       }
 
-      // We write the new file into the ClickHouse event log to keep track for retention and deletions
+      // We write the new file into the ClickHouse event log to keep track for retention and deletions.
+      // This happens after the main entity write succeeds so BullMQ retry semantics remain the source of truth.
       const clickhouseWriter = ClickhouseWriter.getInstance();
-
-      if (
-        env.LANGFUSE_ENABLE_BLOB_STORAGE_FILE_LOG === "true" &&
-        job.data.payload.data.fileKey &&
-        job.data.payload.data.fileKey
-      ) {
-        const fileName = `${job.data.payload.data.fileKey}.json`;
-        clickhouseWriter.addToQueue(TableName.BlobStorageFileLog, {
-          id: randomUUID(),
-          project_id: job.data.payload.authCheck.scope.projectId,
-          entity_type: getClickhouseEntityType(job.data.payload.data.type),
-          entity_id: job.data.payload.data.eventBodyId,
-          event_id: job.data.payload.data.fileKey,
-          bucket_name: env.LANGFUSE_S3_EVENT_UPLOAD_BUCKET,
-          bucket_path: `${env.LANGFUSE_S3_EVENT_UPLOAD_PREFIX}${job.data.payload.authCheck.scope.projectId}/${getClickhouseEntityType(job.data.payload.data.type)}/${job.data.payload.data.eventBodyId}/${fileName}`,
-          created_at: new Date().getTime(),
-          updated_at: new Date().getTime(),
-          event_ts: new Date().getTime(),
-          is_deleted: 0,
-        });
-      }
 
       // If fileKey was processed within the last minutes, i.e. has a match in redis, we skip processing.
       if (
@@ -232,31 +212,6 @@ export const ingestionQueueProcessorBuilder = (
         return;
       }
 
-      // Set "seen" keys in Redis to avoid reprocessing for fast updates.
-      // We use Promise.all internally instead of a redis.pipeline since autoPipelining should handle it correctly
-      // while being redis cluster aware.
-      if (env.LANGFUSE_ENABLE_REDIS_SEEN_EVENT_CACHE === "true" && redis) {
-        try {
-          await Promise.all(
-            eventFiles
-              .map((e) => e.file.split("/").pop() ?? "")
-              .map((key) =>
-                redis!.set(
-                  `langfuse:ingestion:recently-processed:${job.data.payload.authCheck.scope.projectId}:${job.data.payload.data.type}:${job.data.payload.data.eventBodyId}:${key.replace(".json", "")}`,
-                  "1",
-                  "EX",
-                  60 * 5, // 5 minutes
-                ),
-              ),
-          );
-        } catch (e) {
-          logger.warn(
-            `Failed to set recently-processed cache. Continuing processing.`,
-            e,
-          );
-        }
-      }
-
       // Perform merge of those events
       if (!redis) throw new Error("Redis not available");
       if (!prisma) throw new Error("Prisma not available");
@@ -282,6 +237,51 @@ export const ingestionQueueProcessorBuilder = (
         events,
         forwardToEventsTable,
       );
+
+      if (
+        env.LANGFUSE_ENABLE_BLOB_STORAGE_FILE_LOG === "true" &&
+        job.data.payload.data.fileKey
+      ) {
+        const fileName = `${job.data.payload.data.fileKey}.json`;
+        await clickhouseWriter.addToQueueAndWait(TableName.BlobStorageFileLog, {
+          id: randomUUID(),
+          project_id: job.data.payload.authCheck.scope.projectId,
+          entity_type: getClickhouseEntityType(job.data.payload.data.type),
+          entity_id: job.data.payload.data.eventBodyId,
+          event_id: job.data.payload.data.fileKey,
+          bucket_name: env.LANGFUSE_S3_EVENT_UPLOAD_BUCKET,
+          bucket_path: `${env.LANGFUSE_S3_EVENT_UPLOAD_PREFIX}${job.data.payload.authCheck.scope.projectId}/${getClickhouseEntityType(job.data.payload.data.type)}/${job.data.payload.data.eventBodyId}/${fileName}`,
+          created_at: new Date().getTime(),
+          updated_at: new Date().getTime(),
+          event_ts: new Date().getTime(),
+          is_deleted: 0,
+        });
+      }
+
+      // Set "seen" keys in Redis to avoid reprocessing for fast updates.
+      // We use Promise.all internally instead of a redis.pipeline since autoPipelining should handle it correctly
+      // while being redis cluster aware.
+      if (env.LANGFUSE_ENABLE_REDIS_SEEN_EVENT_CACHE === "true" && redis) {
+        try {
+          await Promise.all(
+            eventFiles
+              .map((e) => e.file.split("/").pop() ?? "")
+              .map((key) =>
+                redis!.set(
+                  `langfuse:ingestion:recently-processed:${job.data.payload.authCheck.scope.projectId}:${job.data.payload.data.type}:${job.data.payload.data.eventBodyId}:${key.replace(".json", "")}`,
+                  "1",
+                  "EX",
+                  60 * 5, // 5 minutes
+                ),
+              ),
+          );
+        } catch (e) {
+          logger.warn(
+            `Failed to set recently-processed cache. Continuing processing.`,
+            e,
+          );
+        }
+      }
     } catch (e) {
       // Check if this is a SlowDown error and mark the project for secondary queue
       if (isS3SlowDownError(e)) {

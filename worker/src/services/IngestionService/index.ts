@@ -557,11 +557,18 @@ export class IngestionService {
       )
     ).flat();
 
-    finalDatasetRunItemRecords.forEach((record) => {
-      if (record) {
-        this.clickHouseWriter.addToQueue(TableName.DatasetRunItems, record);
-      }
-    });
+    await Promise.all(
+      finalDatasetRunItemRecords
+        .filter((record): record is NonNullable<typeof record> =>
+          Boolean(record),
+        )
+        .map((record) =>
+          this.clickHouseWriter.addToQueueAndWait(
+            TableName.DatasetRunItems,
+            record,
+          ),
+        ),
+    );
   }
 
   private async processScoreEventList(params: {
@@ -664,7 +671,10 @@ export class IngestionService {
     finalScoreRecord.created_at =
       clickhouseScoreRecord?.created_at ?? createdAtTimestamp.getTime();
 
-    this.clickHouseWriter.addToQueue(TableName.Scores, finalScoreRecord);
+    await this.clickHouseWriter.addToQueueAndWait(
+      TableName.Scores,
+      finalScoreRecord,
+    );
   }
 
   private async processTraceEventList(params: {
@@ -742,7 +752,29 @@ export class IngestionService {
     finalTraceRecord.input = finalIO.input ?? clickhouseTraceRecord?.input;
     finalTraceRecord.output = finalIO.output ?? clickhouseTraceRecord?.output;
 
-    this.clickHouseWriter.addToQueue(TableName.Traces, finalTraceRecord);
+    const clickhouseWritePromises = [
+      this.clickHouseWriter.addToQueueAndWait(
+        TableName.Traces,
+        finalTraceRecord,
+      ),
+    ];
+
+    // Dual-write to staging table for batch propagation to events table
+    // We pretend the trace is a "span" where span_id = trace_id
+    if (createEventTraceRecord) {
+      const traceAsStagingObservation = convertTraceToStagingObservation(
+        finalTraceRecord,
+        this.getPartitionAwareTimestamp(createdAtTimestamp),
+      );
+      clickhouseWritePromises.push(
+        this.clickHouseWriter.addToQueueAndWait(
+          TableName.ObservationsBatchStaging,
+          traceAsStagingObservation,
+        ),
+      );
+    }
+
+    await Promise.all(clickhouseWritePromises);
 
     // If the trace has a sessionId, we upsert the corresponding session into Postgres.
     const traceRecordWithSession = traceRecords
@@ -764,19 +796,6 @@ export class IngestionService {
         );
         throw e;
       }
-    }
-
-    // Dual-write to staging table for batch propagation to events table
-    // We pretend the trace is a "span" where span_id = trace_id
-    if (createEventTraceRecord) {
-      const traceAsStagingObservation = convertTraceToStagingObservation(
-        finalTraceRecord,
-        this.getPartitionAwareTimestamp(createdAtTimestamp),
-      );
-      this.clickHouseWriter.addToQueue(
-        TableName.ObservationsBatchStaging,
-        traceAsStagingObservation,
-      );
     }
 
     // Add trace into trace upsert queue for eval processing
@@ -931,6 +950,8 @@ export class IngestionService {
       ...generationUsage,
     };
 
+    const clickhouseWritePromises: Promise<void>[] = [];
+
     // Backward compat: create wrapper trace for SDK < 2.0.0 events that do not have a traceId
     if (!finalObservationRecord.trace_id) {
       const wrapperTraceRecord: TraceRecordInsertType = {
@@ -948,13 +969,20 @@ export class IngestionService {
         is_deleted: 0,
       };
 
-      this.clickHouseWriter.addToQueue(TableName.Traces, wrapperTraceRecord);
+      clickhouseWritePromises.push(
+        this.clickHouseWriter.addToQueueAndWait(
+          TableName.Traces,
+          wrapperTraceRecord,
+        ),
+      );
       finalObservationRecord.trace_id = finalObservationRecord.id;
     }
 
-    this.clickHouseWriter.addToQueue(
-      TableName.Observations,
-      finalObservationRecord,
+    clickhouseWritePromises.push(
+      this.clickHouseWriter.addToQueueAndWait(
+        TableName.Observations,
+        finalObservationRecord,
+      ),
     );
 
     // Dual-write to staging table for batch propagation to events table
@@ -970,11 +998,15 @@ export class IngestionService {
         s3_first_seen_timestamp:
           this.getPartitionAwareTimestamp(createdAtTimestamp),
       };
-      this.clickHouseWriter.addToQueue(
-        TableName.ObservationsBatchStaging,
-        stagingRecord,
+      clickhouseWritePromises.push(
+        this.clickHouseWriter.addToQueueAndWait(
+          TableName.ObservationsBatchStaging,
+          stagingRecord,
+        ),
       );
     }
+
+    await Promise.all(clickhouseWritePromises);
   }
 
   private async mergeScoreRecords(params: {

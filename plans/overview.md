@@ -43,6 +43,7 @@ Four layers of isolation ensure workloads don't interfere:
 | **P3**: ClickHouse projections | **Dropped** | Doubles storage per table. Only worth it if UI latency is a proven problem — profile first. |
 | **P4**: Observability | **Done** | All logs structured, OTel histograms for export timing. Dashboards/alerting are ops tasks. |
 | **P5**: CI pipeline + fork hygiene | **Done** | CI activated on main. |
+| **P6**: Ingestion durability semantics | In Progress | Awaited critical writes, timeout reconciliation, and post-success dedupe are implemented; DLQ-on-exhaustion remains open. |
 
 ## Key Decisions
 
@@ -71,6 +72,14 @@ Projections pre-sort data for UI query patterns (session view, trace detail). Ho
 The code changes are done: `"Export"` service type in `PreferredClickhouseService`, `CLICKHOUSE_EXPORT_URL` env var, routing in `getClickhouseUrl()`, and all 4 export functions pass `preferredClickhouseService: "Export"`.
 
 What remains is deployment config: mount `docs/clickhouse-users.xml` into ClickHouse and set `CLICKHOUSE_EXPORT_URL` pointing to the export user. This is defense-in-depth — server-enforced `max_memory_usage` prevents OOM even from ad-hoc queries.
+
+### Why P6 (Ingestion durability semantics) is the next correctness plan
+
+Recent production incidents showed that ingestion can report terminal BullMQ failures even when the target `traces` row and `blob_storage_file_log` row already exist. That means the current problem is not only capacity or timeout tuning — it is also an acknowledgement-semantics bug.
+
+The durable fix is to make BullMQ success mean **verified ClickHouse materialization**, not just "queued for write". That requires four changes in the fork: a durable writer acknowledgement barrier, post-timeout existence verification, post-success dedupe markers, and a DLQ instead of drop-on-exhaustion.
+
+See [p6-ingestion-durability-semantics.md](p6-ingestion-durability-semantics.md).
 
 ## Reference
 
