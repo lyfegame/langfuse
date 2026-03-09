@@ -606,7 +606,10 @@ export class ClickhouseWriter {
               errorMessage: error.message,
               originalAttempts: item.attempts,
               originalCreatedAt: new Date(item.createdAt),
-              verificationKey: this.getRecordVerificationKey(tableName, item.data),
+              verificationKey: this.getRecordVerificationKey(
+                tableName,
+                item.data,
+              ),
             },
             name: QueueJobs.ClickhouseWriterDlqJob,
           },
