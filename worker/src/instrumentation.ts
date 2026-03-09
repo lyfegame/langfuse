@@ -36,7 +36,7 @@ const sdk = new NodeSDK({
       requireParentforOutgoingSpans: true,
       ignoreIncomingRequestHook: (req) => {
         // Ignore health checks
-        return ["/api/public/health", "/api/public/ready", "/api/health"].some(
+        return ["/api/public/health", "/api/public/ready", "/api/health", "/api/ready"].some(
           (path) => req.url?.includes(path),
         );
       },

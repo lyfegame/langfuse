@@ -16,12 +16,27 @@ import {
   traceException,
 } from "@langfuse/shared/src/server";
 
+export interface WorkerHealthSnapshot {
+  queueName: string;
+  isRunning: boolean;
+  registeredAt: number;
+  lastReadyAt: number | null;
+  lastActivityAt: number | null;
+  lastCompletedAt: number | null;
+  lastFailedAt: number | null;
+  lastErrorAt: number | null;
+  lastClosedAt: number | null;
+}
+
+type WorkerHealthRecord = Omit<WorkerHealthSnapshot, "isRunning">;
+
 export class WorkerManager {
   private static workers: { [key: string]: Worker } = {};
+  private static workerHealth: { [key: string]: WorkerHealthRecord } = {};
 
   private static metricWrapper(
     processor: Processor,
-    queueName: QueueName,
+    queueName: string,
   ): Processor {
     return async (job: Job) => {
       const startTime = Date.now();
@@ -50,16 +65,10 @@ export class WorkerManager {
                 >,
               );
       Promise.allSettled([
-        // Here we only consider waiting jobs instead of the default ("waiting" or "delayed"
-        // or "prioritized" or "waiting-children") that count provides
         queue?.getWaitingCount().then((count) => {
-          recordGauge(
-            convertQueueNameToMetricName(queueName) + ".length",
-            count,
-            {
-              unit: "records",
-            },
-          );
+          recordGauge(convertQueueNameToMetricName(queueName) + ".length", count, {
+            unit: "records",
+          });
         }),
         queue?.getFailedCount().then((count) => {
           recordGauge(
@@ -82,19 +91,63 @@ export class WorkerManager {
     };
   }
 
+  private static ensureWorkerHealthRecord(queueName: string): WorkerHealthRecord {
+    if (!WorkerManager.workerHealth[queueName]) {
+      WorkerManager.workerHealth[queueName] = {
+        queueName,
+        registeredAt: Date.now(),
+        lastReadyAt: null,
+        lastActivityAt: null,
+        lastCompletedAt: null,
+        lastFailedAt: null,
+        lastErrorAt: null,
+        lastClosedAt: null,
+      };
+    }
+
+    return WorkerManager.workerHealth[queueName];
+  }
+
+  private static updateWorkerHealth(
+    queueName: string,
+    update: Partial<WorkerHealthRecord>,
+  ) {
+    WorkerManager.workerHealth[queueName] = {
+      ...WorkerManager.ensureWorkerHealthRecord(queueName),
+      ...update,
+    };
+  }
+
   public static async closeWorkers(): Promise<void> {
-    await Promise.all(
+    await Promise.allSettled(
       Object.values(WorkerManager.workers).map((worker) => worker.close()),
     );
+    WorkerManager.workers = {};
+    WorkerManager.workerHealth = {};
     logger.info("All workers have been closed.");
   }
 
-  public static getWorker(queueName: QueueName): Worker | undefined {
+  public static getWorker(queueName: string): Worker | undefined {
     return WorkerManager.workers[queueName];
   }
 
+  public static getWorkerHealthSnapshot(
+    queueName: string,
+  ): WorkerHealthSnapshot | null {
+    const workerHealth = WorkerManager.workerHealth[queueName];
+
+    if (!workerHealth) {
+      return null;
+    }
+
+    return {
+      ...workerHealth,
+      isRunning: WorkerManager.workers[queueName]?.isRunning() ?? false,
+    };
+  }
+
   public static register(
-    queueName: QueueName,
+    queueName: string,
     processor: Processor,
     additionalOptions: Partial<WorkerOptions> = {},
   ): void {
@@ -103,14 +156,12 @@ export class WorkerManager {
       return;
     }
 
-    // Create redis connection for queue worker
     const redisInstance = createNewRedisInstance(redisQueueRetryOptions);
     if (!redisInstance) {
       logger.error("Failed to initialize redis connection");
       return;
     }
 
-    // Register worker
     const worker = new Worker(
       queueName,
       WorkerManager.metricWrapper(processor, queueName),
@@ -121,10 +172,35 @@ export class WorkerManager {
       },
     );
     WorkerManager.workers[queueName] = worker;
+    WorkerManager.ensureWorkerHealthRecord(queueName);
     logger.info(`${queueName} executor started: ${worker.isRunning()}`);
 
-    // Add error handling
+    worker.on("ready", () => {
+      WorkerManager.updateWorkerHealth(queueName, {
+        lastReadyAt: Date.now(),
+      });
+    });
+
+    worker.on("active", () => {
+      WorkerManager.updateWorkerHealth(queueName, {
+        lastActivityAt: Date.now(),
+      });
+    });
+
+    worker.on("completed", () => {
+      const now = Date.now();
+      WorkerManager.updateWorkerHealth(queueName, {
+        lastActivityAt: now,
+        lastCompletedAt: now,
+      });
+    });
+
     worker.on("failed", (job: Job | undefined, err: Error) => {
+      const now = Date.now();
+      WorkerManager.updateWorkerHealth(queueName, {
+        lastActivityAt: now,
+        lastFailedAt: now,
+      });
       logger.error(
         `Queue job ${job?.name} with id ${job?.id} in ${queueName} failed`,
         err,
@@ -132,13 +208,23 @@ export class WorkerManager {
       traceException(err);
       recordIncrement(convertQueueNameToMetricName(queueName) + ".failed");
     });
+
     worker.on("error", (failedReason: Error) => {
+      WorkerManager.updateWorkerHealth(queueName, {
+        lastErrorAt: Date.now(),
+      });
       logger.error(
         `Queue job ${queueName} errored: ${failedReason}`,
         failedReason,
       );
       traceException(failedReason);
       recordIncrement(convertQueueNameToMetricName(queueName) + ".error");
+    });
+
+    worker.on("closed", () => {
+      WorkerManager.updateWorkerHealth(queueName, {
+        lastClosedAt: Date.now(),
+      });
     });
   }
 }

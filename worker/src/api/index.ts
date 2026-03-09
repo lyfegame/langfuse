@@ -1,13 +1,15 @@
 import express from "express";
-import { traceException } from "@langfuse/shared/src/server";
-
-import { checkContainerHealth } from "../features/health";
-import { logger } from "@langfuse/shared/src/server";
+import {
+  checkBullMqHealth,
+  checkContainerReadiness,
+} from "../features/health";
+import type { WorkerHealthResponse } from "../features/health";
+import { logger, traceException } from "@langfuse/shared/src/server";
 const router = express.Router();
 
-router.get<{}, { status: string }>("/health", async (_req, res) => {
+router.get<{}, WorkerHealthResponse>("/health", async (_req, res) => {
   try {
-    await checkContainerHealth(res, false);
+    await checkBullMqHealth(res);
   } catch (e) {
     traceException(e);
     logger.error("Health check failed", e);
@@ -19,7 +21,7 @@ router.get<{}, { status: string }>("/health", async (_req, res) => {
 
 router.get<{}, { status: string }>("/ready", async (_req, res) => {
   try {
-    await checkContainerHealth(res, true);
+    await checkContainerReadiness(res, true);
   } catch (e) {
     traceException(e);
     logger.error("Readiness check failed", e);
