@@ -1,10 +1,12 @@
 import express from "express";
+import { logger, traceException } from "@langfuse/shared/src/server";
+
 import {
   checkBullMqHealth,
   checkContainerReadiness,
 } from "../features/health";
 import type { WorkerHealthResponse } from "../features/health";
-import { logger, traceException } from "@langfuse/shared/src/server";
+
 const router = express.Router();
 
 router.get<{}, WorkerHealthResponse>("/health", async (_req, res) => {

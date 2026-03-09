@@ -16,8 +16,7 @@ export interface BullMqQueueRuntimeSnapshot {
   waitingCountSource: BullMqQueueDepthSource;
 }
 
-export interface BullMqQueueHealthSnapshot
-  extends BullMqQueueRuntimeSnapshot {
+export interface BullMqQueueHealthSnapshot extends BullMqQueueRuntimeSnapshot {
   status: BullMqQueueHealthStatus;
   reason: string;
   inactivityMs: number | null;
@@ -138,7 +137,9 @@ export const evaluateBullMqHealth = ({
     };
   });
 
-  const firstUnhealthyQueue = queues.find((queue) => queue.status === "unhealthy");
+  const firstUnhealthyQueue = queues.find(
+    (queue) => queue.status === "unhealthy",
+  );
 
   return {
     status: firstUnhealthyQueue ? "unhealthy" : "healthy",

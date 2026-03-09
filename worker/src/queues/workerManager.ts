@@ -66,9 +66,13 @@ export class WorkerManager {
               );
       Promise.allSettled([
         queue?.getWaitingCount().then((count) => {
-          recordGauge(convertQueueNameToMetricName(queueName) + ".length", count, {
-            unit: "records",
-          });
+          recordGauge(
+            convertQueueNameToMetricName(queueName) + ".length",
+            count,
+            {
+              unit: "records",
+            },
+          );
         }),
         queue?.getFailedCount().then((count) => {
           recordGauge(
@@ -91,7 +95,9 @@ export class WorkerManager {
     };
   }
 
-  private static ensureWorkerHealthRecord(queueName: string): WorkerHealthRecord {
+  private static ensureWorkerHealthRecord(
+    queueName: string,
+  ): WorkerHealthRecord {
     if (!WorkerManager.workerHealth[queueName]) {
       WorkerManager.workerHealth[queueName] = {
         queueName,

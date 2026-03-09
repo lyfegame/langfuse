@@ -12,13 +12,12 @@ import type { Response } from "express";
 
 import { env } from "../../env";
 import { WorkerManager } from "../../queues/workerManager";
-import type { WorkerHealthSnapshot } from "../../queues/workerManager";
 import { evaluateBullMqHealth } from "./bullMqHealth";
 import type {
   BullMqHealthCheckResponse,
   BullMqQueueDepthSource,
-  BullMqQueueRuntimeSnapshot,
 } from "./bullMqHealth";
+import { buildBullMqQueueRuntimeSnapshot } from "./bullMqRuntimeSnapshot";
 
 const READINESS_REDIS_TIMEOUT_MS = 2_000;
 const BULLMQ_HEALTH_STALE_MS = 2 * 60 * 1000;
@@ -88,10 +87,15 @@ export const checkBullMqHealth = async (
   const expectedQueueNames = getExpectedBullMqQueueNames();
   const queueSnapshots = await Promise.all(
     expectedQueueNames.map(async (queueName) =>
-      buildBullMqQueueRuntimeSnapshot(
+      buildBullMqQueueRuntimeSnapshot({
         queueName,
-        WorkerManager.getWorkerHealthSnapshot(queueName),
-      ),
+        workerSnapshot: WorkerManager.getWorkerHealthSnapshot(queueName),
+        now: Date.now(),
+        processStartedAt: PROCESS_STARTED_AT,
+        startupGraceMs: BULLMQ_HEALTH_STARTUP_GRACE_MS,
+        staleAfterMs: BULLMQ_HEALTH_STALE_MS,
+        getQueueWaitingCount,
+      }),
     ),
   );
 
@@ -128,20 +132,6 @@ const getExpectedBullMqQueueNames = (): string[] => {
   return queueNames;
 };
 
-const latestTimestamp = (
-  ...timestamps: Array<number | null | undefined>
-): number | null => {
-  const validTimestamps = timestamps.filter(
-    (timestamp): timestamp is number => typeof timestamp === "number",
-  );
-
-  if (validTimestamps.length === 0) {
-    return null;
-  }
-
-  return Math.max(...validTimestamps);
-};
-
 const getQueueForHealth = (queueName: string): Queue | null => {
   if (queueName.startsWith(QueueName.IngestionQueue)) {
     return IngestionQueue.getInstance({ shardName: queueName });
@@ -156,75 +146,6 @@ const getQueueForHealth = (queueName: string): Queue | null => {
   }
 
   return null;
-};
-
-const buildBullMqQueueRuntimeSnapshot = async (
-  queueName: string,
-  workerSnapshot: WorkerHealthSnapshot | null,
-): Promise<BullMqQueueRuntimeSnapshot> => {
-  const now = Date.now();
-
-  if (!workerSnapshot) {
-    if (now - PROCESS_STARTED_AT <= BULLMQ_HEALTH_STARTUP_GRACE_MS) {
-      return {
-        queueName,
-        isRegistered: true,
-        isRunning: true,
-        registeredAt: PROCESS_STARTED_AT,
-        lastReadyAt: null,
-        lastActivityAt: null,
-        lastCompletedAt: null,
-        lastFailedAt: null,
-        lastErrorAt: null,
-        lastClosedAt: null,
-        waitingCount: null,
-        waitingCountSource: "skipped",
-      };
-    }
-
-    return {
-      queueName,
-      isRegistered: false,
-      isRunning: false,
-      registeredAt: null,
-      lastReadyAt: null,
-      lastActivityAt: null,
-      lastCompletedAt: null,
-      lastFailedAt: null,
-      lastErrorAt: null,
-      lastClosedAt: null,
-      waitingCount: null,
-      waitingCountSource: "skipped",
-    };
-  }
-
-  const lastProgressAt = latestTimestamp(
-    workerSnapshot.lastActivityAt,
-    workerSnapshot.lastCompletedAt,
-    workerSnapshot.lastFailedAt,
-    workerSnapshot.lastReadyAt,
-    workerSnapshot.registeredAt,
-  );
-  const shouldCheckQueueDepth =
-    lastProgressAt === null || now - lastProgressAt > BULLMQ_HEALTH_STALE_MS;
-  const { waitingCount, waitingCountSource } = shouldCheckQueueDepth
-    ? await getQueueWaitingCount(queueName)
-    : { waitingCount: null, waitingCountSource: "skipped" as const };
-
-  return {
-    queueName,
-    isRegistered: true,
-    isRunning: workerSnapshot.isRunning,
-    registeredAt: workerSnapshot.registeredAt,
-    lastReadyAt: workerSnapshot.lastReadyAt,
-    lastActivityAt: workerSnapshot.lastActivityAt,
-    lastCompletedAt: workerSnapshot.lastCompletedAt,
-    lastFailedAt: workerSnapshot.lastFailedAt,
-    lastErrorAt: workerSnapshot.lastErrorAt,
-    lastClosedAt: workerSnapshot.lastClosedAt,
-    waitingCount,
-    waitingCountSource,
-  };
 };
 
 const getQueueWaitingCount = async (
