@@ -11,6 +11,7 @@ Improvement plans for `lyfegame/langfuse` — the data aggregation backbone for 
 | [p1-clickhouse-server-profiles.md](p1-clickhouse-server-profiles.md) | **Done** | Export service routing + users.xml template for server-side profiles |
 | [p4-observability-and-monitoring.md](p4-observability-and-monitoring.md) | **Done** | All logs structured, OTel histograms, dashboards/alerting are ops |
 | [p5-ci-and-fork-hygiene.md](p5-ci-and-fork-hygiene.md) | **Done** | CI pipeline, branch strategy, release tagging |
+| [p6-ingestion-durability-semantics.md](p6-ingestion-durability-semantics.md) | Proposed | Durable BullMQ acknowledgement + DLQ-backed ingestion semantics |
 
 ## What's Done
 
