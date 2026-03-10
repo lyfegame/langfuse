@@ -2,11 +2,19 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Job } from "bullmq";
 import { QueueName, type TQueueJobTypes } from "@langfuse/shared/src/server";
 
-const mergeAndWriteMock = vi.fn();
-const addToQueueAndWaitMock = vi.fn();
-const redisExistsMock = vi.fn();
-const redisSetMock = vi.fn();
-const downloadMock = vi.fn();
+const {
+  mergeAndWriteMock,
+  addToQueueAndWaitMock,
+  redisExistsMock,
+  redisSetMock,
+  downloadMock,
+} = vi.hoisted(() => ({
+  mergeAndWriteMock: vi.fn(),
+  addToQueueAndWaitMock: vi.fn(),
+  redisExistsMock: vi.fn(),
+  redisSetMock: vi.fn(),
+  downloadMock: vi.fn(),
+}));
 
 vi.mock("@langfuse/shared/src/db", () => ({
   prisma: {},

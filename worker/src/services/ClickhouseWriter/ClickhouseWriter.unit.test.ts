@@ -37,6 +37,7 @@ vi.mock("../../env", async (importOriginal) => {
     env: {
       LANGFUSE_INGESTION_CLICKHOUSE_WRITE_BATCH_SIZE: 100,
       LANGFUSE_INGESTION_CLICKHOUSE_WRITE_INTERVAL_MS: 5000,
+      LANGFUSE_INGESTION_CLICKHOUSE_SYNC_FLUSH_DELAY_MS: 100,
       LANGFUSE_INGESTION_CLICKHOUSE_MAX_ATTEMPTS: 6,
       LANGFUSE_INGESTION_CLICKHOUSE_REQUEST_TIMEOUT_MS: 60000,
       LANGFUSE_INGESTION_CLICKHOUSE_RETRY_INITIAL_DELAY_MS: 1000,
@@ -120,6 +121,79 @@ describe("ClickhouseWriter", () => {
     await vi.advanceTimersByTimeAsync(writer.writeInterval);
 
     expect(mockInsert).toHaveBeenCalledTimes(1);
+  });
+
+  it("should flush awaited writes on the sync flush delay", async () => {
+    const mockInsert = vi
+      .spyOn(clickhouseClientMock, "insert")
+      .mockResolvedValue();
+
+    const writePromise = writer.addToQueueAndWait(TableName.Traces, {
+      id: "1",
+      project_id: "project-1",
+      event_ts: 1000,
+      name: "test",
+    } as any);
+
+    await vi.advanceTimersByTimeAsync(
+      env.LANGFUSE_INGESTION_CLICKHOUSE_SYNC_FLUSH_DELAY_MS,
+    );
+
+    await expect(writePromise).resolves.toBeUndefined();
+    expect(mockInsert).toHaveBeenCalledTimes(1);
+  });
+
+  it("should not flush non-awaited writes on the sync flush delay", async () => {
+    const mockInsert = vi
+      .spyOn(clickhouseClientMock, "insert")
+      .mockResolvedValue();
+
+    writer.addToQueue(TableName.Traces, { id: "1", name: "test" } as any);
+
+    await vi.advanceTimersByTimeAsync(
+      env.LANGFUSE_INGESTION_CLICKHOUSE_SYNC_FLUSH_DELAY_MS,
+    );
+
+    expect(mockInsert).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(
+      writer.writeInterval -
+        env.LANGFUSE_INGESTION_CLICKHOUSE_SYNC_FLUSH_DELAY_MS,
+    );
+
+    expect(mockInsert).toHaveBeenCalledTimes(1);
+  });
+
+  it("should batch awaited writes queued within the sync flush delay", async () => {
+    const mockInsert = vi
+      .spyOn(clickhouseClientMock, "insert")
+      .mockResolvedValue();
+
+    const writes = [
+      writer.addToQueueAndWait(TableName.Traces, {
+        id: "1",
+        project_id: "project-1",
+        event_ts: 1000,
+        name: "test-1",
+      } as any),
+      writer.addToQueueAndWait(TableName.Traces, {
+        id: "2",
+        project_id: "project-1",
+        event_ts: 1001,
+        name: "test-2",
+      } as any),
+    ];
+
+    await vi.advanceTimersByTimeAsync(
+      env.LANGFUSE_INGESTION_CLICKHOUSE_SYNC_FLUSH_DELAY_MS,
+    );
+
+    await expect(Promise.all(writes)).resolves.toEqual([undefined, undefined]);
+    expect(mockInsert).toHaveBeenCalledTimes(1);
+    expect(mockInsert.mock.calls[0][0].values).toEqual([
+      expect.objectContaining({ id: "1" }),
+      expect.objectContaining({ id: "2" }),
+    ]);
   });
 
   it("should handle errors and retry", async () => {
@@ -206,12 +280,8 @@ describe("ClickhouseWriter", () => {
         ),
       ),
     ).toBe(true);
-    expect(
-      writer["isRetryableError"](new Error("Timeout error.")),
-    ).toBe(true);
-    expect(
-      writer["isRetryableError"](new Error("socket hang up")),
-    ).toBe(true);
+    expect(writer["isRetryableError"](new Error("Timeout error."))).toBe(true);
+    expect(writer["isRetryableError"](new Error("socket hang up"))).toBe(true);
     expect(writer["isRetryableError"](new Error("Syntax error"))).toBe(false);
   });
 
@@ -219,13 +289,17 @@ describe("ClickhouseWriter", () => {
     const mockInsert = vi
       .spyOn(clickhouseClientMock, "insert")
       .mockRejectedValueOnce(new Error("Timeout error."));
-    const mockQuery = vi.spyOn(clickhouseClientMock, "query").mockResolvedValue({
-      query_id: "verify-query",
-      response_headers: { "x-clickhouse-summary": [] },
-      json: vi.fn().mockResolvedValue([
-        { verification_key: "trace-1", max_event_ts_ms: "1000" },
-      ]),
-    } as any);
+    const mockQuery = vi
+      .spyOn(clickhouseClientMock, "query")
+      .mockResolvedValue({
+        query_id: "verify-query",
+        response_headers: { "x-clickhouse-summary": [] },
+        json: vi
+          .fn()
+          .mockResolvedValue([
+            { verification_key: "trace-1", max_event_ts_ms: "1000" },
+          ]),
+      } as any);
 
     const writePromise = writer.addToQueueAndWait(TableName.Traces, {
       id: "trace-1",
@@ -247,13 +321,17 @@ describe("ClickhouseWriter", () => {
       .spyOn(clickhouseClientMock, "insert")
       .mockRejectedValueOnce(new Error("Timeout error."))
       .mockResolvedValueOnce();
-    const mockQuery = vi.spyOn(clickhouseClientMock, "query").mockResolvedValue({
-      query_id: "verify-query",
-      response_headers: { "x-clickhouse-summary": [] },
-      json: vi.fn().mockResolvedValue([
-        { verification_key: "trace-1", max_event_ts_ms: "1000" },
-      ]),
-    } as any);
+    const mockQuery = vi
+      .spyOn(clickhouseClientMock, "query")
+      .mockResolvedValue({
+        query_id: "verify-query",
+        response_headers: { "x-clickhouse-summary": [] },
+        json: vi
+          .fn()
+          .mockResolvedValue([
+            { verification_key: "trace-1", max_event_ts_ms: "1000" },
+          ]),
+      } as any);
 
     const firstWrite = writer.addToQueueAndWait(TableName.Traces, {
       id: "trace-1",
@@ -289,11 +367,13 @@ describe("ClickhouseWriter", () => {
     const mockInsert = vi
       .spyOn(clickhouseClientMock, "insert")
       .mockRejectedValue(new Error("Timeout error."));
-    const mockQuery = vi.spyOn(clickhouseClientMock, "query").mockResolvedValue({
-      query_id: "verify-query",
-      response_headers: { "x-clickhouse-summary": [] },
-      json: vi.fn().mockResolvedValue([]),
-    } as any);
+    const mockQuery = vi
+      .spyOn(clickhouseClientMock, "query")
+      .mockResolvedValue({
+        query_id: "verify-query",
+        response_headers: { "x-clickhouse-summary": [] },
+        json: vi.fn().mockResolvedValue([]),
+      } as any);
 
     const writePromise = writer.addToQueueAndWait(TableName.Traces, {
       id: "trace-1",
@@ -301,10 +381,11 @@ describe("ClickhouseWriter", () => {
       event_ts: 1000,
       name: "test",
     } as any);
+    const rejection = expect(writePromise).rejects.toThrow("Timeout error.");
 
     await vi.advanceTimersByTimeAsync(30000);
 
-    await expect(writePromise).rejects.toThrow("Timeout error.");
+    await rejection;
     expect(mockInsert).toHaveBeenCalled();
     expect(mockQuery).toHaveBeenCalled();
     expect(writer["queue"][TableName.Traces]).toHaveLength(0);
@@ -320,6 +401,13 @@ describe("ClickhouseWriter", () => {
       )
       .mockRejectedValueOnce(new Error("Timeout error."))
       .mockResolvedValueOnce();
+    const mockQuery = vi
+      .spyOn(clickhouseClientMock, "query")
+      .mockResolvedValue({
+        query_id: "verify-query",
+        response_headers: { "x-clickhouse-summary": [] },
+        json: vi.fn().mockResolvedValue([]),
+      } as any);
 
     writer.addToQueue(TableName.BlobStorageFileLog, {
       id: "1",
@@ -338,6 +426,7 @@ describe("ClickhouseWriter", () => {
     await vi.advanceTimersByTimeAsync(writer.writeInterval + 3000);
 
     expect(mockInsert).toHaveBeenCalledTimes(3);
+    expect(mockQuery).toHaveBeenCalledTimes(1);
     expect(writer["queue"][TableName.BlobStorageFileLog]).toHaveLength(0);
     expect(logger.warn).toHaveBeenCalledWith(
       expect.stringContaining("retryable error"),

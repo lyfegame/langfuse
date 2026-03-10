@@ -38,16 +38,19 @@ export class ClickhouseWriter {
   private static client: ClickhouseClientType | null = null;
   batchSize: number;
   writeInterval: number;
+  syncFlushDelay: number;
   maxAttempts: number;
   queue: ClickhouseQueue;
 
   isIntervalFlushInProgress: boolean;
   intervalId: NodeJS.Timeout | null = null;
   private flushChains: Partial<Record<TableName, Promise<void>>> = {};
+  private syncFlushTimers: Partial<Record<TableName, NodeJS.Timeout>> = {};
 
   private constructor() {
     this.batchSize = env.LANGFUSE_INGESTION_CLICKHOUSE_WRITE_BATCH_SIZE;
     this.writeInterval = env.LANGFUSE_INGESTION_CLICKHOUSE_WRITE_INTERVAL_MS;
+    this.syncFlushDelay = env.LANGFUSE_INGESTION_CLICKHOUSE_SYNC_FLUSH_DELAY_MS;
     this.maxAttempts = env.LANGFUSE_INGESTION_CLICKHOUSE_MAX_ATTEMPTS;
 
     this.isIntervalFlushInProgress = false;
@@ -84,7 +87,7 @@ export class ClickhouseWriter {
 
   private start() {
     logger.info(
-      `Starting ClickhouseWriter. Max interval: ${this.writeInterval} ms, Max batch size: ${this.batchSize}`,
+      `Starting ClickhouseWriter. Max interval: ${this.writeInterval} ms, Sync flush delay: ${this.syncFlushDelay} ms, Max batch size: ${this.batchSize}`,
     );
 
     this.intervalId = setInterval(() => {
@@ -107,6 +110,9 @@ export class ClickhouseWriter {
       clearInterval(this.intervalId);
       this.intervalId = null;
     }
+
+    Object.values(this.syncFlushTimers).forEach((timer) => clearTimeout(timer));
+    this.syncFlushTimers = {};
 
     await this.flushAll(true);
 
@@ -140,6 +146,7 @@ export class ClickhouseWriter {
     tableName: T,
     fullQueue = false,
   ): Promise<void> {
+    this.clearSyncFlushTimer(tableName);
     const currentFlush = this.flushChains[tableName] ?? Promise.resolve();
     const nextFlush = currentFlush
       .catch(() => undefined)
@@ -151,6 +158,32 @@ export class ClickhouseWriter {
     });
     this.flushChains[tableName] = trackedFlush;
     return trackedFlush;
+  }
+
+  private scheduleSyncFlush(tableName: TableName) {
+    if (this.syncFlushTimers[tableName]) {
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      delete this.syncFlushTimers[tableName];
+      this.flushTable(tableName).catch((err) => {
+        logger.error(`ClickhouseWriter.scheduleSyncFlush ${tableName}`, err);
+      });
+    }, this.syncFlushDelay);
+
+    timer.unref?.();
+    this.syncFlushTimers[tableName] = timer;
+  }
+
+  private clearSyncFlushTimer(tableName: TableName) {
+    const timer = this.syncFlushTimers[tableName];
+    if (!timer) {
+      return;
+    }
+
+    clearTimeout(timer);
+    delete this.syncFlushTimers[tableName];
   }
 
   private getRetryableErrorType(
@@ -553,6 +586,7 @@ export class ClickhouseWriter {
   ): Promise<void> {
     return new Promise<void>((resolve, reject) => {
       this.enqueueItem(tableName, data, { resolve, reject });
+      this.scheduleSyncFlush(tableName);
     });
   }
 
