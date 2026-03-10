@@ -177,6 +177,18 @@ type ClickhouseWriteContext = {
   postCommitActions?: Array<() => Promise<void>>;
 };
 
+type DurableTableName =
+  | TableName.Traces
+  | TableName.Scores
+  | TableName.Observations;
+
+type DurableRecordInsertType<T extends DurableTableName> =
+  T extends TableName.Traces
+    ? TraceRecordInsertType
+    : T extends TableName.Scores
+      ? ScoreRecordInsertType
+      : ObservationRecordInsertType;
+
 const immutableEntityKeys: {
   [TableName.Traces]: (keyof TraceRecordInsertType)[];
   [TableName.Scores]: (keyof ScoreRecordInsertType)[];
@@ -287,7 +299,6 @@ export class IngestionService {
           entityId: eventBodyId,
           createdAtTimestamp,
           datasetRunItemEventList: events as DatasetRunItemEventType[],
-          clickhouseWriteContext,
         });
       }
     }
@@ -484,12 +495,50 @@ export class IngestionService {
     this.clickHouseWriter.addToQueue(TableName.Events, eventRecord);
   }
 
+  private enqueueDurableWrite<T extends DurableTableName>(params: {
+    tableName: T;
+    record: DurableRecordInsertType<T>;
+    clickhouseWriteContext?: ClickhouseWriteContext;
+    clickhouseWritePromises: Promise<void>[];
+  }) {
+    const {
+      tableName,
+      record,
+      clickhouseWriteContext,
+      clickhouseWritePromises,
+    } = params;
+
+    if (clickhouseWriteContext?.commitGroup) {
+      this.clickHouseWriter.addToCommitGroup(
+        tableName,
+        record as never,
+        clickhouseWriteContext.commitGroup,
+      );
+      return;
+    }
+
+    clickhouseWritePromises.push(
+      this.clickHouseWriter.addToQueueAndWait(tableName, record as never),
+    );
+  }
+
+  private deferPostCommitAction(
+    clickhouseWriteContext: ClickhouseWriteContext | undefined,
+    action: () => Promise<void>,
+  ): boolean {
+    if (!clickhouseWriteContext?.postCommitActions) {
+      return false;
+    }
+
+    clickhouseWriteContext.postCommitActions.push(action);
+    return true;
+  }
+
   private async processDatasetRunItemEventList(params: {
     projectId: string;
     entityId: string;
     createdAtTimestamp: Date;
     datasetRunItemEventList: DatasetRunItemEventType[];
-    clickhouseWriteContext?: ClickhouseWriteContext;
   }) {
     const { projectId, entityId, datasetRunItemEventList } = params;
     if (datasetRunItemEventList.length === 0) return;
@@ -686,19 +735,15 @@ export class IngestionService {
     finalScoreRecord.created_at =
       clickhouseScoreRecord?.created_at ?? createdAtTimestamp.getTime();
 
-    if (clickhouseWriteContext?.commitGroup) {
-      this.clickHouseWriter.addToCommitGroup(
-        TableName.Scores,
-        finalScoreRecord,
-        clickhouseWriteContext.commitGroup,
-      );
-      return;
-    }
+    const clickhouseWritePromises: Promise<void>[] = [];
+    this.enqueueDurableWrite({
+      tableName: TableName.Scores,
+      record: finalScoreRecord,
+      clickhouseWriteContext,
+      clickhouseWritePromises,
+    });
 
-    await this.clickHouseWriter.addToQueueAndWait(
-      TableName.Scores,
-      finalScoreRecord,
-    );
+    await Promise.all(clickhouseWritePromises);
   }
 
   private async processTraceEventList(params: {
@@ -779,21 +824,12 @@ export class IngestionService {
     finalTraceRecord.output = finalIO.output ?? clickhouseTraceRecord?.output;
 
     const clickhouseWritePromises: Promise<void>[] = [];
-
-    if (clickhouseWriteContext?.commitGroup) {
-      this.clickHouseWriter.addToCommitGroup(
-        TableName.Traces,
-        finalTraceRecord,
-        clickhouseWriteContext.commitGroup,
-      );
-    } else {
-      clickhouseWritePromises.push(
-        this.clickHouseWriter.addToQueueAndWait(
-          TableName.Traces,
-          finalTraceRecord,
-        ),
-      );
-    }
+    this.enqueueDurableWrite({
+      tableName: TableName.Traces,
+      record: finalTraceRecord,
+      clickhouseWriteContext,
+      clickhouseWritePromises,
+    });
 
     // Dual-write to staging table for batch propagation to events table
     // We pretend the trace is a "span" where span_id = trace_id
@@ -864,8 +900,9 @@ export class IngestionService {
       });
     };
 
-    if (clickhouseWriteContext?.postCommitActions) {
-      clickhouseWriteContext.postCommitActions.push(runPostCommitActions);
+    if (
+      this.deferPostCommitAction(clickhouseWriteContext, runPostCommitActions)
+    ) {
       return;
     }
 
@@ -1013,37 +1050,21 @@ export class IngestionService {
         is_deleted: 0,
       };
 
-      if (clickhouseWriteContext?.commitGroup) {
-        this.clickHouseWriter.addToCommitGroup(
-          TableName.Traces,
-          wrapperTraceRecord,
-          clickhouseWriteContext.commitGroup,
-        );
-      } else {
-        clickhouseWritePromises.push(
-          this.clickHouseWriter.addToQueueAndWait(
-            TableName.Traces,
-            wrapperTraceRecord,
-          ),
-        );
-      }
+      this.enqueueDurableWrite({
+        tableName: TableName.Traces,
+        record: wrapperTraceRecord,
+        clickhouseWriteContext,
+        clickhouseWritePromises,
+      });
       finalObservationRecord.trace_id = finalObservationRecord.id;
     }
 
-    if (clickhouseWriteContext?.commitGroup) {
-      this.clickHouseWriter.addToCommitGroup(
-        TableName.Observations,
-        finalObservationRecord,
-        clickhouseWriteContext.commitGroup,
-      );
-    } else {
-      clickhouseWritePromises.push(
-        this.clickHouseWriter.addToQueueAndWait(
-          TableName.Observations,
-          finalObservationRecord,
-        ),
-      );
-    }
+    this.enqueueDurableWrite({
+      tableName: TableName.Observations,
+      record: finalObservationRecord,
+      clickhouseWriteContext,
+      clickhouseWritePromises,
+    });
 
     // Dual-write to staging table for batch propagation to events table
     // Here, we add some additional logic around the first seen timestamp.

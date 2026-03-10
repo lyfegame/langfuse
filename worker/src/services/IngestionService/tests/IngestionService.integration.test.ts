@@ -110,6 +110,161 @@ describe("Ingestion end-to-end tests", () => {
     expect(trace.timestamp).toBe(timestamp);
   });
 
+  it("should keep grouped canonical writes invisible until commit", async () => {
+    const traceId = randomUUID();
+    const fileKey = randomUUID();
+    const timestamp = new Date().toISOString();
+    const commitGroup = clickhouseWriter.createCommitGroup();
+    const postCommitActions: Array<() => Promise<void>> = [];
+
+    const eventList: TraceEventType[] = [
+      {
+        type: "trace-create",
+        id: traceId,
+        timestamp,
+        body: {
+          id: traceId,
+          name: "grouped-trace",
+          timestamp,
+          environment,
+          input: "foo",
+          output: "bar",
+        },
+      },
+    ];
+
+    await ingestionService.mergeAndWrite(
+      "trace",
+      projectId,
+      traceId,
+      new Date(timestamp),
+      eventList,
+      false,
+      {
+        commitGroup,
+        postCommitActions,
+      },
+    );
+
+    clickhouseWriter.addToCommitGroup(
+      TableName.BlobStorageFileLog,
+      {
+        id: randomUUID(),
+        project_id: projectId,
+        entity_type: "trace",
+        entity_id: traceId,
+        event_id: fileKey,
+        bucket_name: "langfuse",
+        bucket_path: `events/${projectId}/trace/${traceId}/${fileKey}.json`,
+        created_at: Date.now(),
+        updated_at: Date.now(),
+        event_ts: Date.now(),
+        is_deleted: 0,
+      },
+      commitGroup,
+    );
+
+    expect(await getClickhouseCount(TableName.Traces, "id", traceId)).toBe(0);
+    expect(
+      await getClickhouseCount(
+        TableName.BlobStorageFileLog,
+        "event_id",
+        fileKey,
+      ),
+    ).toBe(0);
+
+    await clickhouseWriter.commitGroup(commitGroup);
+    await Promise.all(postCommitActions.map((action) => action()));
+
+    await waitForExpect(async () => {
+      expect(await getClickhouseCount(TableName.Traces, "id", traceId)).toBe(1);
+      expect(
+        await getClickhouseCount(
+          TableName.BlobStorageFileLog,
+          "event_id",
+          fileKey,
+        ),
+      ).toBe(1);
+    });
+
+    const trace = await getClickhouseRecord(TableName.Traces, traceId);
+    expect(trace.id).toBe(traceId);
+    expect(trace.input).toBe("foo");
+    expect(trace.output).toBe("bar");
+  });
+
+  it("should defer trace post-commit actions until after grouped writes commit", async () => {
+    const traceId = randomUUID();
+    const sessionId = randomUUID();
+    const organizationId = randomUUID();
+    const timestamp = new Date().toISOString();
+    const commitGroup = clickhouseWriter.createCommitGroup();
+    const postCommitActions: Array<() => Promise<void>> = [];
+
+    await prisma.organization.upsert({
+      where: { id: organizationId },
+      update: {},
+      create: {
+        id: organizationId,
+        name: `Org-${organizationId}`,
+      },
+    });
+    await prisma.project.upsert({
+      where: { id: projectId },
+      update: {},
+      create: {
+        id: projectId,
+        orgId: organizationId,
+        name: `Project-${projectId}`,
+      },
+    });
+
+    const eventList: TraceEventType[] = [
+      {
+        type: "trace-create",
+        id: traceId,
+        timestamp,
+        body: {
+          id: traceId,
+          name: "trace-with-session",
+          timestamp,
+          environment,
+          sessionId,
+        },
+      },
+    ];
+
+    await ingestionService.mergeAndWrite(
+      "trace",
+      projectId,
+      traceId,
+      new Date(timestamp),
+      eventList,
+      false,
+      {
+        commitGroup,
+        postCommitActions,
+      },
+    );
+
+    expect(postCommitActions).toHaveLength(1);
+    expect(await getClickhouseCount(TableName.Traces, "id", traceId)).toBe(0);
+    expect(await getTraceSessionCount(sessionId)).toBe(0);
+
+    await clickhouseWriter.commitGroup(commitGroup);
+
+    await waitForExpect(async () => {
+      expect(await getClickhouseCount(TableName.Traces, "id", traceId)).toBe(1);
+    });
+    expect(await getTraceSessionCount(sessionId)).toBe(0);
+
+    await Promise.all(postCommitActions.map((action) => action()));
+
+    await waitForExpect(async () => {
+      expect(await getTraceSessionCount(sessionId)).toBe(1);
+    });
+  });
+
   [
     {
       usage: {
@@ -2869,6 +3024,30 @@ async function getClickhouseRecord<T extends TableName>(
           ? observationRecordReadSchema.parse(result)
           : scoreRecordReadSchema.parse(result)
   ) as RecordReadType<T>;
+}
+
+async function getClickhouseCount(
+  tableName: TableName,
+  fieldName: "id" | "event_id",
+  value: string,
+): Promise<number> {
+  const query = await clickhouseClient().query({
+    query: `SELECT count() AS count FROM ${tableName} FINAL WHERE project_id = '${projectId}' AND ${fieldName} = '${value}'`,
+    format: "JSONEachRow",
+  });
+
+  const result = (await query.json()) as Array<{ count: string | number }>;
+  return Number(result[0]?.count ?? 0);
+}
+
+async function getTraceSessionCount(sessionId: string): Promise<number> {
+  const result = await prisma.$queryRaw<Array<{ count: bigint }>>`
+    SELECT count(*)::bigint AS count
+    FROM trace_sessions
+    WHERE id = ${sessionId} AND project_id = ${projectId}
+  `;
+
+  return Number(result[0]?.count ?? 0);
 }
 
 type RecordReadType<T extends TableName> = T extends TableName.Scores
