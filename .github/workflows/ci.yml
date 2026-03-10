@@ -11,6 +11,38 @@ env:
   TURBO_TEAM: ${{ secrets.TURBO_TEAM }}
 
 jobs:
+  worker-durability-tests:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
+          cache: "pnpm"
+
+      - name: Install deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Generate Prisma Client
+        run: pnpm turbo db:generate
+
+      - name: Build shared package
+        run: pnpm turbo build --filter=@langfuse/shared
+        env:
+          SKIP_ENV_VALIDATION: true
+
+      - name: Run worker durability tests
+        run: pnpm --filter=worker run test:durability
+        env:
+          SKIP_ENV_VALIDATION: true
+
   worker-health-tests:
     runs-on: ubuntu-latest
 
