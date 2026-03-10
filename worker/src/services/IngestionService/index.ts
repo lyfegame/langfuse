@@ -53,7 +53,11 @@ import {
 
 import { tokenCountAsync } from "../../features/tokenisation/async-usage";
 import { tokenCount } from "../../features/tokenisation/usage";
-import { ClickhouseWriter, TableName } from "../ClickhouseWriter";
+import {
+  ClickhouseCommitGroup,
+  ClickhouseWriter,
+  TableName,
+} from "../ClickhouseWriter";
 import {
   convertJsonSchemaToRecord,
   convertPostgresJsonToMetadataRecord,
@@ -168,6 +172,11 @@ export type EventInput = {
   [key: string]: any;
 };
 
+type ClickhouseWriteContext = {
+  commitGroup?: ClickhouseCommitGroup;
+  postCommitActions?: Array<() => Promise<void>>;
+};
+
 const immutableEntityKeys: {
   [TableName.Traces]: (keyof TraceRecordInsertType)[];
   [TableName.Scores]: (keyof ScoreRecordInsertType)[];
@@ -238,6 +247,7 @@ export class IngestionService {
     createdAtTimestamp: Date,
     events: IngestionEventType[],
     forwardToEventsTable: boolean,
+    clickhouseWriteContext?: ClickhouseWriteContext,
   ): Promise<void> {
     logger.debug(
       `Merging ingestion ${eventType} event for project ${projectId} and event ${eventBodyId}`,
@@ -251,6 +261,7 @@ export class IngestionService {
           createdAtTimestamp,
           traceEventList: events as TraceEventType[],
           createEventTraceRecord: forwardToEventsTable,
+          clickhouseWriteContext,
         });
       case "observation":
         return await this.processObservationEventList({
@@ -259,6 +270,7 @@ export class IngestionService {
           createdAtTimestamp,
           observationEventList: events as ObservationEvent[],
           writeToStagingTables: forwardToEventsTable,
+          clickhouseWriteContext,
         });
       case "score": {
         return await this.processScoreEventList({
@@ -266,6 +278,7 @@ export class IngestionService {
           entityId: eventBodyId,
           createdAtTimestamp,
           scoreEventList: events as ScoreEventType[],
+          clickhouseWriteContext,
         });
       }
       case "dataset_run_item": {
@@ -274,6 +287,7 @@ export class IngestionService {
           entityId: eventBodyId,
           createdAtTimestamp,
           datasetRunItemEventList: events as DatasetRunItemEventType[],
+          clickhouseWriteContext,
         });
       }
     }
@@ -475,6 +489,7 @@ export class IngestionService {
     entityId: string;
     createdAtTimestamp: Date;
     datasetRunItemEventList: DatasetRunItemEventType[];
+    clickhouseWriteContext?: ClickhouseWriteContext;
   }) {
     const { projectId, entityId, datasetRunItemEventList } = params;
     if (datasetRunItemEventList.length === 0) return;
@@ -557,18 +572,11 @@ export class IngestionService {
       )
     ).flat();
 
-    await Promise.all(
-      finalDatasetRunItemRecords
-        .filter((record): record is NonNullable<typeof record> =>
-          Boolean(record),
-        )
-        .map((record) =>
-          this.clickHouseWriter.addToQueueAndWait(
-            TableName.DatasetRunItems,
-            record,
-          ),
-        ),
-    );
+    finalDatasetRunItemRecords
+      .filter((record): record is NonNullable<typeof record> => Boolean(record))
+      .forEach((record) => {
+        this.clickHouseWriter.addToQueue(TableName.DatasetRunItems, record);
+      });
   }
 
   private async processScoreEventList(params: {
@@ -576,8 +584,15 @@ export class IngestionService {
     entityId: string;
     createdAtTimestamp: Date;
     scoreEventList: ScoreEventType[];
+    clickhouseWriteContext?: ClickhouseWriteContext;
   }) {
-    const { projectId, entityId, createdAtTimestamp, scoreEventList } = params;
+    const {
+      projectId,
+      entityId,
+      createdAtTimestamp,
+      scoreEventList,
+      clickhouseWriteContext,
+    } = params;
     if (scoreEventList.length === 0) return;
 
     const timeSortedEvents =
@@ -671,6 +686,15 @@ export class IngestionService {
     finalScoreRecord.created_at =
       clickhouseScoreRecord?.created_at ?? createdAtTimestamp.getTime();
 
+    if (clickhouseWriteContext?.commitGroup) {
+      this.clickHouseWriter.addToCommitGroup(
+        TableName.Scores,
+        finalScoreRecord,
+        clickhouseWriteContext.commitGroup,
+      );
+      return;
+    }
+
     await this.clickHouseWriter.addToQueueAndWait(
       TableName.Scores,
       finalScoreRecord,
@@ -683,6 +707,7 @@ export class IngestionService {
     createdAtTimestamp: Date;
     traceEventList: TraceEventType[];
     createEventTraceRecord: boolean;
+    clickhouseWriteContext?: ClickhouseWriteContext;
   }) {
     const {
       projectId,
@@ -690,6 +715,7 @@ export class IngestionService {
       createdAtTimestamp,
       traceEventList,
       createEventTraceRecord,
+      clickhouseWriteContext,
     } = params;
     if (traceEventList.length === 0) return;
 
@@ -752,12 +778,22 @@ export class IngestionService {
     finalTraceRecord.input = finalIO.input ?? clickhouseTraceRecord?.input;
     finalTraceRecord.output = finalIO.output ?? clickhouseTraceRecord?.output;
 
-    const clickhouseWritePromises = [
-      this.clickHouseWriter.addToQueueAndWait(
+    const clickhouseWritePromises: Promise<void>[] = [];
+
+    if (clickhouseWriteContext?.commitGroup) {
+      this.clickHouseWriter.addToCommitGroup(
         TableName.Traces,
         finalTraceRecord,
-      ),
-    ];
+        clickhouseWriteContext.commitGroup,
+      );
+    } else {
+      clickhouseWritePromises.push(
+        this.clickHouseWriter.addToQueueAndWait(
+          TableName.Traces,
+          finalTraceRecord,
+        ),
+      );
+    }
 
     // Dual-write to staging table for batch propagation to events table
     // We pretend the trace is a "span" where span_id = trace_id
@@ -772,42 +808,42 @@ export class IngestionService {
       );
     }
 
-    await Promise.all(clickhouseWritePromises);
-
-    // If the trace has a sessionId, we upsert the corresponding session into Postgres.
-    const traceRecordWithSession = traceRecords
-      .slice()
-      .reverse()
-      .find((t) => t.session_id);
-    if (traceRecordWithSession) {
-      try {
-        await this.prisma.$executeRaw`
-          INSERT INTO trace_sessions (id, project_id, environment, created_at, updated_at)
-          VALUES (${traceRecordWithSession.session_id}, ${projectId}, ${traceRecordWithSession.environment}, NOW(), NOW())
-          ON CONFLICT (id, project_id)
-          DO NOTHING
-        `;
-      } catch (e) {
-        logger.error(
-          `Failed to upsert session ${traceRecordWithSession.session_id}`,
-          e,
-        );
-        throw e;
+    const runPostCommitActions = async () => {
+      // If the trace has a sessionId, we upsert the corresponding session into Postgres.
+      const traceRecordWithSession = traceRecords
+        .slice()
+        .reverse()
+        .find((t) => t.session_id);
+      if (traceRecordWithSession) {
+        try {
+          await this.prisma.$executeRaw`
+            INSERT INTO trace_sessions (id, project_id, environment, created_at, updated_at)
+            VALUES (${traceRecordWithSession.session_id}, ${projectId}, ${traceRecordWithSession.environment}, NOW(), NOW())
+            ON CONFLICT (id, project_id)
+            DO NOTHING
+          `;
+        } catch (e) {
+          logger.error(
+            `Failed to upsert session ${traceRecordWithSession.session_id}`,
+            e,
+          );
+          throw e;
+        }
       }
-    }
 
-    // Add trace into trace upsert queue for eval processing
-    // First check if we already know this project has no job configurations
-    const hasNoJobConfigs = await hasNoEvalConfigsCache(
-      projectId,
-      "traceBased",
-    );
-    if (hasNoJobConfigs) {
-      logger.debug(
-        `Skipping TraceUpsert queue for project ${projectId} - no job configs cached`,
+      // Add trace into trace upsert queue for eval processing
+      // First check if we already know this project has no job configurations
+      const hasNoJobConfigs = await hasNoEvalConfigsCache(
+        projectId,
+        "traceBased",
       );
-      return;
-    } else {
+      if (hasNoJobConfigs) {
+        logger.debug(
+          `Skipping TraceUpsert queue for project ${projectId} - no job configs cached`,
+        );
+        return;
+      }
+
       // Job configs present, so we add to the TraceUpsert queue.
       const shardingKey = `${projectId}-${entityId}`;
       const traceUpsertQueue = TraceUpsertQueue.getInstance({ shardingKey });
@@ -826,7 +862,15 @@ export class IngestionService {
         timestamp: new Date(),
         name: QueueJobs.TraceUpsert as const,
       });
+    };
+
+    if (clickhouseWriteContext?.postCommitActions) {
+      clickhouseWriteContext.postCommitActions.push(runPostCommitActions);
+      return;
     }
+
+    await Promise.all(clickhouseWritePromises);
+    await runPostCommitActions();
   }
 
   private async processObservationEventList(params: {
@@ -835,6 +879,7 @@ export class IngestionService {
     createdAtTimestamp: Date;
     observationEventList: ObservationEvent[];
     writeToStagingTables: boolean;
+    clickhouseWriteContext?: ClickhouseWriteContext;
   }) {
     const {
       projectId,
@@ -842,6 +887,7 @@ export class IngestionService {
       createdAtTimestamp,
       observationEventList,
       writeToStagingTables,
+      clickhouseWriteContext,
     } = params;
     if (observationEventList.length === 0) return;
 
@@ -967,21 +1013,37 @@ export class IngestionService {
         is_deleted: 0,
       };
 
-      clickhouseWritePromises.push(
-        this.clickHouseWriter.addToQueueAndWait(
+      if (clickhouseWriteContext?.commitGroup) {
+        this.clickHouseWriter.addToCommitGroup(
           TableName.Traces,
           wrapperTraceRecord,
-        ),
-      );
+          clickhouseWriteContext.commitGroup,
+        );
+      } else {
+        clickhouseWritePromises.push(
+          this.clickHouseWriter.addToQueueAndWait(
+            TableName.Traces,
+            wrapperTraceRecord,
+          ),
+        );
+      }
       finalObservationRecord.trace_id = finalObservationRecord.id;
     }
 
-    clickhouseWritePromises.push(
-      this.clickHouseWriter.addToQueueAndWait(
+    if (clickhouseWriteContext?.commitGroup) {
+      this.clickHouseWriter.addToCommitGroup(
         TableName.Observations,
         finalObservationRecord,
-      ),
-    );
+        clickhouseWriteContext.commitGroup,
+      );
+    } else {
+      clickhouseWritePromises.push(
+        this.clickHouseWriter.addToQueueAndWait(
+          TableName.Observations,
+          finalObservationRecord,
+        ),
+      );
+    }
 
     // Dual-write to staging table for batch propagation to events table
     // Here, we add some additional logic around the first seen timestamp.

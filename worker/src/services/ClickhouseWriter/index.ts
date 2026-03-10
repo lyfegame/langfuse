@@ -580,14 +580,51 @@ export class ClickhouseWriter {
     this.enqueueItem(tableName, data);
   }
 
+  public createCommitGroup(): ClickhouseCommitGroup {
+    return {
+      touchedTables: new Set<TableName>(),
+      pendingWrites: [],
+      isCommitted: false,
+    };
+  }
+
+  public addToCommitGroup<T extends TableName>(
+    tableName: T,
+    data: RecordInsertType<T>,
+    commitGroup: ClickhouseCommitGroup,
+  ): Promise<void> {
+    if (commitGroup.isCommitted) {
+      throw new Error("Cannot add to a committed ClickHouse commit group");
+    }
+
+    const writePromise = new Promise<void>((resolve, reject) => {
+      this.enqueueItem(tableName, data, { resolve, reject });
+    });
+
+    commitGroup.touchedTables.add(tableName);
+    commitGroup.pendingWrites.push(writePromise);
+
+    return writePromise;
+  }
+
+  public async commitGroup(commitGroup: ClickhouseCommitGroup): Promise<void> {
+    if (!commitGroup.isCommitted) {
+      commitGroup.isCommitted = true;
+      commitGroup.touchedTables.forEach((tableName) => {
+        this.scheduleSyncFlush(tableName);
+      });
+    }
+
+    await Promise.all(commitGroup.pendingWrites);
+  }
+
   public addToQueueAndWait<T extends TableName>(
     tableName: T,
     data: RecordInsertType<T>,
   ): Promise<void> {
-    return new Promise<void>((resolve, reject) => {
-      this.enqueueItem(tableName, data, { resolve, reject });
-      this.scheduleSyncFlush(tableName);
-    });
+    const commitGroup = this.createCommitGroup();
+    this.addToCommitGroup(tableName, data, commitGroup);
+    return this.commitGroup(commitGroup);
   }
 
   private enqueueItem<T extends TableName>(
@@ -889,6 +926,12 @@ type RecordInsertType<T extends TableName> = T extends TableName.Scores
               : T extends TableName.Events
                 ? EventRecordInsertType
                 : never;
+
+export type ClickhouseCommitGroup = {
+  touchedTables: Set<TableName>;
+  pendingWrites: Promise<void>[];
+  isCommitted: boolean;
+};
 
 type ClickhouseQueue = {
   [T in TableName]: ClickhouseWriterQueueItem<T>[];
