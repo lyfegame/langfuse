@@ -38,6 +38,9 @@ jobs:
         env:
           SKIP_ENV_VALIDATION: true
 
+      - name: Seed local test env
+        run: cp .env.dev.example .env
+
       - name: Run worker durability tests
         run: pnpm --filter=worker run test:durability
         env:
