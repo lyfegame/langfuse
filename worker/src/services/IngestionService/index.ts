@@ -766,11 +766,9 @@ export class IngestionService {
         finalTraceRecord,
         this.getPartitionAwareTimestamp(createdAtTimestamp),
       );
-      clickhouseWritePromises.push(
-        this.clickHouseWriter.addToQueueAndWait(
-          TableName.ObservationsBatchStaging,
-          traceAsStagingObservation,
-        ),
+      this.clickHouseWriter.addToQueue(
+        TableName.ObservationsBatchStaging,
+        traceAsStagingObservation,
       );
     }
 
@@ -998,11 +996,9 @@ export class IngestionService {
         s3_first_seen_timestamp:
           this.getPartitionAwareTimestamp(createdAtTimestamp),
       };
-      clickhouseWritePromises.push(
-        this.clickHouseWriter.addToQueueAndWait(
-          TableName.ObservationsBatchStaging,
-          stagingRecord,
-        ),
+      this.clickHouseWriter.addToQueue(
+        TableName.ObservationsBatchStaging,
+        stagingRecord,
       );
     }
 

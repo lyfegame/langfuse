@@ -94,6 +94,10 @@ const EnvSchema = z.object({
     .number()
     .positive()
     .default(1000),
+  LANGFUSE_INGESTION_CLICKHOUSE_SYNC_FLUSH_DELAY_MS: z.coerce
+    .number()
+    .positive()
+    .default(100),
   LANGFUSE_INGESTION_CLICKHOUSE_MAX_ATTEMPTS: z.coerce
     .number()
     .positive()
