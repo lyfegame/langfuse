@@ -7,7 +7,9 @@ import {
   getCurrentSpan,
   getS3EventStorageClient,
   type IngestionEventType,
+  type ObservationEvent,
   logger,
+  type TraceEventType,
   OtelIngestionProcessor,
   processEventBatch,
   QueueName,
@@ -253,6 +255,87 @@ export function synthesizeMissingTraceCreateEvents(params: {
   return Array.from(synthesized.values());
 }
 
+type EventWithBodyId = { body: { id?: string | null } };
+
+function groupEventsByEntityId<T extends EventWithBodyId>(events: T[]): Map<string, T[]> {
+  const grouped = new Map<string, T[]>();
+
+  for (const event of events) {
+    const entityId = event.body.id;
+    if (!entityId) continue;
+
+    const existing = grouped.get(entityId);
+    if (existing) {
+      existing.push(event);
+    } else {
+      grouped.set(entityId, [event]);
+    }
+  }
+
+  return grouped;
+}
+
+export async function writeInlineOtelEntities(params: {
+  ingestionService: Pick<IngestionService, "mergeAndWrite">;
+  clickhouseWriter: Pick<ClickhouseWriter, "createCommitGroup" | "commitGroup">;
+  projectId: string;
+  traceEvents: TraceEventType[];
+  observations: ObservationEvent[];
+  forwardToEventsTable: boolean;
+  createdAtTimestamp?: Date;
+}): Promise<void> {
+  const {
+    ingestionService,
+    clickhouseWriter,
+    projectId,
+    traceEvents,
+    observations,
+    forwardToEventsTable,
+  } = params;
+
+  if (traceEvents.length === 0 && observations.length === 0) {
+    return;
+  }
+
+  const commitGroup = clickhouseWriter.createCommitGroup();
+  const postCommitActions: Array<() => Promise<void>> = [];
+  const createdAtTimestamp = params.createdAtTimestamp ?? new Date();
+  const clickhouseWriteContext = {
+    commitGroup,
+    postCommitActions,
+  };
+
+  const inlineTraceWrites = Array.from(groupEventsByEntityId(traceEvents)).map(
+    ([traceId, groupedTraceEvents]) =>
+      ingestionService.mergeAndWrite(
+        "trace",
+        projectId,
+        traceId,
+        createdAtTimestamp,
+        groupedTraceEvents,
+        forwardToEventsTable,
+        clickhouseWriteContext,
+      ),
+  );
+
+  const inlineObservationWrites = Array.from(groupEventsByEntityId(observations)).map(
+    ([observationId, groupedObservationEvents]) =>
+      ingestionService.mergeAndWrite(
+        "observation",
+        projectId,
+        observationId,
+        createdAtTimestamp,
+        groupedObservationEvents,
+        forwardToEventsTable,
+        clickhouseWriteContext,
+      ),
+  );
+
+  await Promise.all([...inlineTraceWrites, ...inlineObservationWrites]);
+  await clickhouseWriter.commitGroup(commitGroup);
+  await Promise.all(postCommitActions.map((action) => action()));
+}
+
 /**
  * Check if SDK meets version requirements for direct event writes.
  *
@@ -376,13 +459,21 @@ export const otelIngestionQueueProcessor: Processor = async (
     const events: IngestionEventType[] =
       await processor.processToIngestionEvents(parsedSpans);
     // Here, we split the events into observations and non-observations.
-    // Observations go into the IngestionService directly whereas the non-observations make another run through the processEventBatch method.
-    const traces = events.filter(
+    // Observations and trace events stay on the inline ingestion path, whereas
+    // other non-observation events make another run through processEventBatch.
+    const nonObservationEvents = events.filter(
       (e) => getClickhouseEntityType(e.type) !== "observation",
     );
+    const inlineTraceEvents: TraceEventType[] = nonObservationEvents.filter(
+      (e): e is TraceEventType => getClickhouseEntityType(e.type) === "trace",
+    );
+    const queuedNonObservationEvents = nonObservationEvents.filter(
+      (e) => getClickhouseEntityType(e.type) !== "trace",
+    );
+
     // We need to parse each incoming observation through our ingestion schema to make use of its included transformations.
     const ingestionSchema = createIngestionEventSchema();
-    const observations = events
+    const observations: ObservationEvent[] = events
       .filter((e) => getClickhouseEntityType(e.type) === "observation")
       .map((o) => ingestionSchema.safeParse(o))
       .flatMap((o) => {
@@ -393,15 +484,20 @@ export const otelIngestionQueueProcessor: Processor = async (
           );
           return [];
         }
-        return [o.data];
+
+        if (getClickhouseEntityType(o.data.type) !== "observation") {
+          return [];
+        }
+
+        return [o.data as ObservationEvent];
       });
 
     const syntheticTraceCreateEvents = synthesizeMissingTraceCreateEvents({
       observations,
-      traces,
+      traces: inlineTraceEvents,
     });
     if (syntheticTraceCreateEvents.length > 0) {
-      traces.push(...syntheticTraceCreateEvents);
+      inlineTraceEvents.push(...syntheticTraceCreateEvents);
       logger.info(
         `Synthesized ${syntheticTraceCreateEvents.length} shallow trace-create events for project ${projectId} in ${fileKey}`,
       );
@@ -415,17 +511,21 @@ export const otelIngestionQueueProcessor: Processor = async (
       );
     }
 
-    // In the next row, we only consider observations. The traces will be recorded in processEventBatch.
     recordIncrement("langfuse.ingestion.event", observations.length, {
       source: "otel",
     });
-    // Record more stats specific to the Otel processing
-    recordDistribution("langfuse.ingestion.otel.trace_count", traces.length);
+    recordDistribution(
+      "langfuse.ingestion.otel.trace_count",
+      inlineTraceEvents.length,
+    );
     recordDistribution(
       "langfuse.ingestion.otel.observation_count",
       observations.length,
     );
-    span?.setAttribute("langfuse.ingestion.otel.trace_count", traces.length);
+    span?.setAttribute(
+      "langfuse.ingestion.otel.trace_count",
+      inlineTraceEvents.length,
+    );
     span?.setAttribute(
       "langfuse.ingestion.otel.observation_count",
       observations.length,
@@ -435,10 +535,11 @@ export const otelIngestionQueueProcessor: Processor = async (
     if (!redis) throw new Error("Redis not available");
     if (!prisma) throw new Error("Prisma not available");
 
+    const clickhouseWriter = ClickhouseWriter.getInstance();
     const ingestionService = new IngestionService(
       redis,
       prisma,
-      ClickhouseWriter.getInstance(),
+      clickhouseWriter,
       clickhouseClient(),
     );
 
@@ -495,32 +596,30 @@ export const otelIngestionQueueProcessor: Processor = async (
       env.QUEUE_CONSUMER_EVENT_PROPAGATION_QUEUE_IS_ENABLED === "true" &&
       env.LANGFUSE_EXPERIMENT_EARLY_EXIT_EVENT_BATCH_JOB !== "true";
 
-    // Running everything concurrently might be detrimental to the event loop, but has probably
-    // the highest possible throughput. Therefore, we start with a Promise.all.
-    // If necessary, we may use a for each instead.
+    // Keep observation and trace materialization on the same inline durable
+    // path so shallow trace rows do not lag behind a backlogged ingestion queue.
+    const inlineEntityWritePromise = writeInlineOtelEntities({
+      ingestionService,
+      clickhouseWriter,
+      projectId: auth.scope.projectId,
+      traceEvents: inlineTraceEvents,
+      observations,
+      forwardToEventsTable: shouldForwardToEventsTable,
+      createdAtTimestamp: new Date(),
+    });
 
-    // Process observations via mergeAndWrite
-    const observationWritePromise = Promise.all(
-      observations.map((observation) =>
-        ingestionService.mergeAndWrite(
-          getClickhouseEntityType(observation.type),
-          auth.scope.projectId,
-          observation.body.id || "", // id is always defined for observations
-          new Date(), // Use the current timestamp as event time
-          [observation],
-          shouldForwardToEventsTable,
-        ),
-      ),
-    );
+    const queuedNonObservationWritePromise =
+      queuedNonObservationEvents.length > 0
+        ? processEventBatch(queuedNonObservationEvents, auth, {
+            delay: 0,
+            source: "otel",
+            forwardToEventsTable: shouldForwardToEventsTable,
+          })
+        : Promise.resolve();
 
-    // Process traces and observations concurrently
     await Promise.all([
-      observationWritePromise,
-      processEventBatch(traces, auth, {
-        delay: 0,
-        source: "otel",
-        forwardToEventsTable: shouldForwardToEventsTable,
-      }),
+      inlineEntityWritePromise,
+      queuedNonObservationWritePromise,
     ]);
 
     // Process events for observation evals and direct event writes
