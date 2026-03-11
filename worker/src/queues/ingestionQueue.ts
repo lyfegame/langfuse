@@ -223,6 +223,8 @@ export const ingestionQueueProcessorBuilder = (
         (env.LANGFUSE_EXPERIMENT_INSERT_INTO_EVENTS_TABLE === "true" &&
           env.QUEUE_CONSUMER_EVENT_PROPAGATION_QUEUE_IS_ENABLED === "true" &&
           env.LANGFUSE_EXPERIMENT_EARLY_EXIT_EVENT_BATCH_JOB !== "true");
+      const clickhouseCommitGroup = clickhouseWriter.createCommitGroup();
+      const postCommitActions: Array<() => Promise<void>> = [];
 
       await new IngestionService(
         redis,
@@ -236,6 +238,10 @@ export const ingestionQueueProcessorBuilder = (
         firstS3WriteTime,
         events,
         forwardToEventsTable,
+        {
+          commitGroup: clickhouseCommitGroup,
+          postCommitActions,
+        },
       );
 
       if (
@@ -243,20 +249,27 @@ export const ingestionQueueProcessorBuilder = (
         job.data.payload.data.fileKey
       ) {
         const fileName = `${job.data.payload.data.fileKey}.json`;
-        await clickhouseWriter.addToQueueAndWait(TableName.BlobStorageFileLog, {
-          id: randomUUID(),
-          project_id: job.data.payload.authCheck.scope.projectId,
-          entity_type: getClickhouseEntityType(job.data.payload.data.type),
-          entity_id: job.data.payload.data.eventBodyId,
-          event_id: job.data.payload.data.fileKey,
-          bucket_name: env.LANGFUSE_S3_EVENT_UPLOAD_BUCKET,
-          bucket_path: `${env.LANGFUSE_S3_EVENT_UPLOAD_PREFIX}${job.data.payload.authCheck.scope.projectId}/${getClickhouseEntityType(job.data.payload.data.type)}/${job.data.payload.data.eventBodyId}/${fileName}`,
-          created_at: new Date().getTime(),
-          updated_at: new Date().getTime(),
-          event_ts: new Date().getTime(),
-          is_deleted: 0,
-        });
+        clickhouseWriter.addToCommitGroup(
+          TableName.BlobStorageFileLog,
+          {
+            id: randomUUID(),
+            project_id: job.data.payload.authCheck.scope.projectId,
+            entity_type: getClickhouseEntityType(job.data.payload.data.type),
+            entity_id: job.data.payload.data.eventBodyId,
+            event_id: job.data.payload.data.fileKey,
+            bucket_name: env.LANGFUSE_S3_EVENT_UPLOAD_BUCKET,
+            bucket_path: `${env.LANGFUSE_S3_EVENT_UPLOAD_PREFIX}${job.data.payload.authCheck.scope.projectId}/${getClickhouseEntityType(job.data.payload.data.type)}/${job.data.payload.data.eventBodyId}/${fileName}`,
+            created_at: new Date().getTime(),
+            updated_at: new Date().getTime(),
+            event_ts: new Date().getTime(),
+            is_deleted: 0,
+          },
+          clickhouseCommitGroup,
+        );
       }
+
+      await clickhouseWriter.commitGroup(clickhouseCommitGroup);
+      await Promise.all(postCommitActions.map((action) => action()));
 
       // Set "seen" keys in Redis to avoid reprocessing for fast updates.
       // We use Promise.all internally instead of a redis.pipeline since autoPipelining should handle it correctly

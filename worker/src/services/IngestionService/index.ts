@@ -53,7 +53,11 @@ import {
 
 import { tokenCountAsync } from "../../features/tokenisation/async-usage";
 import { tokenCount } from "../../features/tokenisation/usage";
-import { ClickhouseWriter, TableName } from "../ClickhouseWriter";
+import {
+  ClickhouseCommitGroup,
+  ClickhouseWriter,
+  TableName,
+} from "../ClickhouseWriter";
 import {
   convertJsonSchemaToRecord,
   convertPostgresJsonToMetadataRecord,
@@ -168,6 +172,23 @@ export type EventInput = {
   [key: string]: any;
 };
 
+type ClickhouseWriteContext = {
+  commitGroup?: ClickhouseCommitGroup;
+  postCommitActions?: Array<() => Promise<void>>;
+};
+
+type DurableTableName =
+  | TableName.Traces
+  | TableName.Scores
+  | TableName.Observations;
+
+type DurableRecordInsertType<T extends DurableTableName> =
+  T extends TableName.Traces
+    ? TraceRecordInsertType
+    : T extends TableName.Scores
+      ? ScoreRecordInsertType
+      : ObservationRecordInsertType;
+
 const immutableEntityKeys: {
   [TableName.Traces]: (keyof TraceRecordInsertType)[];
   [TableName.Scores]: (keyof ScoreRecordInsertType)[];
@@ -238,6 +259,7 @@ export class IngestionService {
     createdAtTimestamp: Date,
     events: IngestionEventType[],
     forwardToEventsTable: boolean,
+    clickhouseWriteContext?: ClickhouseWriteContext,
   ): Promise<void> {
     logger.debug(
       `Merging ingestion ${eventType} event for project ${projectId} and event ${eventBodyId}`,
@@ -251,6 +273,7 @@ export class IngestionService {
           createdAtTimestamp,
           traceEventList: events as TraceEventType[],
           createEventTraceRecord: forwardToEventsTable,
+          clickhouseWriteContext,
         });
       case "observation":
         return await this.processObservationEventList({
@@ -259,6 +282,7 @@ export class IngestionService {
           createdAtTimestamp,
           observationEventList: events as ObservationEvent[],
           writeToStagingTables: forwardToEventsTable,
+          clickhouseWriteContext,
         });
       case "score": {
         return await this.processScoreEventList({
@@ -266,6 +290,7 @@ export class IngestionService {
           entityId: eventBodyId,
           createdAtTimestamp,
           scoreEventList: events as ScoreEventType[],
+          clickhouseWriteContext,
         });
       }
       case "dataset_run_item": {
@@ -470,6 +495,45 @@ export class IngestionService {
     this.clickHouseWriter.addToQueue(TableName.Events, eventRecord);
   }
 
+  private enqueueDurableWrite<T extends DurableTableName>(params: {
+    tableName: T;
+    record: DurableRecordInsertType<T>;
+    clickhouseWriteContext?: ClickhouseWriteContext;
+    clickhouseWritePromises: Promise<void>[];
+  }) {
+    const {
+      tableName,
+      record,
+      clickhouseWriteContext,
+      clickhouseWritePromises,
+    } = params;
+
+    if (clickhouseWriteContext?.commitGroup) {
+      this.clickHouseWriter.addToCommitGroup(
+        tableName,
+        record as never,
+        clickhouseWriteContext.commitGroup,
+      );
+      return;
+    }
+
+    clickhouseWritePromises.push(
+      this.clickHouseWriter.addToQueueAndWait(tableName, record as never),
+    );
+  }
+
+  private deferPostCommitAction(
+    clickhouseWriteContext: ClickhouseWriteContext | undefined,
+    action: () => Promise<void>,
+  ): boolean {
+    if (!clickhouseWriteContext?.postCommitActions) {
+      return false;
+    }
+
+    clickhouseWriteContext.postCommitActions.push(action);
+    return true;
+  }
+
   private async processDatasetRunItemEventList(params: {
     projectId: string;
     entityId: string;
@@ -557,18 +621,11 @@ export class IngestionService {
       )
     ).flat();
 
-    await Promise.all(
-      finalDatasetRunItemRecords
-        .filter((record): record is NonNullable<typeof record> =>
-          Boolean(record),
-        )
-        .map((record) =>
-          this.clickHouseWriter.addToQueueAndWait(
-            TableName.DatasetRunItems,
-            record,
-          ),
-        ),
-    );
+    finalDatasetRunItemRecords
+      .filter((record): record is NonNullable<typeof record> => Boolean(record))
+      .forEach((record) => {
+        this.clickHouseWriter.addToQueue(TableName.DatasetRunItems, record);
+      });
   }
 
   private async processScoreEventList(params: {
@@ -576,8 +633,15 @@ export class IngestionService {
     entityId: string;
     createdAtTimestamp: Date;
     scoreEventList: ScoreEventType[];
+    clickhouseWriteContext?: ClickhouseWriteContext;
   }) {
-    const { projectId, entityId, createdAtTimestamp, scoreEventList } = params;
+    const {
+      projectId,
+      entityId,
+      createdAtTimestamp,
+      scoreEventList,
+      clickhouseWriteContext,
+    } = params;
     if (scoreEventList.length === 0) return;
 
     const timeSortedEvents =
@@ -671,10 +735,15 @@ export class IngestionService {
     finalScoreRecord.created_at =
       clickhouseScoreRecord?.created_at ?? createdAtTimestamp.getTime();
 
-    await this.clickHouseWriter.addToQueueAndWait(
-      TableName.Scores,
-      finalScoreRecord,
-    );
+    const clickhouseWritePromises: Promise<void>[] = [];
+    this.enqueueDurableWrite({
+      tableName: TableName.Scores,
+      record: finalScoreRecord,
+      clickhouseWriteContext,
+      clickhouseWritePromises,
+    });
+
+    await Promise.all(clickhouseWritePromises);
   }
 
   private async processTraceEventList(params: {
@@ -683,6 +752,7 @@ export class IngestionService {
     createdAtTimestamp: Date;
     traceEventList: TraceEventType[];
     createEventTraceRecord: boolean;
+    clickhouseWriteContext?: ClickhouseWriteContext;
   }) {
     const {
       projectId,
@@ -690,6 +760,7 @@ export class IngestionService {
       createdAtTimestamp,
       traceEventList,
       createEventTraceRecord,
+      clickhouseWriteContext,
     } = params;
     if (traceEventList.length === 0) return;
 
@@ -752,12 +823,13 @@ export class IngestionService {
     finalTraceRecord.input = finalIO.input ?? clickhouseTraceRecord?.input;
     finalTraceRecord.output = finalIO.output ?? clickhouseTraceRecord?.output;
 
-    const clickhouseWritePromises = [
-      this.clickHouseWriter.addToQueueAndWait(
-        TableName.Traces,
-        finalTraceRecord,
-      ),
-    ];
+    const clickhouseWritePromises: Promise<void>[] = [];
+    this.enqueueDurableWrite({
+      tableName: TableName.Traces,
+      record: finalTraceRecord,
+      clickhouseWriteContext,
+      clickhouseWritePromises,
+    });
 
     // Dual-write to staging table for batch propagation to events table
     // We pretend the trace is a "span" where span_id = trace_id
@@ -772,42 +844,42 @@ export class IngestionService {
       );
     }
 
-    await Promise.all(clickhouseWritePromises);
-
-    // If the trace has a sessionId, we upsert the corresponding session into Postgres.
-    const traceRecordWithSession = traceRecords
-      .slice()
-      .reverse()
-      .find((t) => t.session_id);
-    if (traceRecordWithSession) {
-      try {
-        await this.prisma.$executeRaw`
-          INSERT INTO trace_sessions (id, project_id, environment, created_at, updated_at)
-          VALUES (${traceRecordWithSession.session_id}, ${projectId}, ${traceRecordWithSession.environment}, NOW(), NOW())
-          ON CONFLICT (id, project_id)
-          DO NOTHING
-        `;
-      } catch (e) {
-        logger.error(
-          `Failed to upsert session ${traceRecordWithSession.session_id}`,
-          e,
-        );
-        throw e;
+    const runPostCommitActions = async () => {
+      // If the trace has a sessionId, we upsert the corresponding session into Postgres.
+      const traceRecordWithSession = traceRecords
+        .slice()
+        .reverse()
+        .find((t) => t.session_id);
+      if (traceRecordWithSession) {
+        try {
+          await this.prisma.$executeRaw`
+            INSERT INTO trace_sessions (id, project_id, environment, created_at, updated_at)
+            VALUES (${traceRecordWithSession.session_id}, ${projectId}, ${traceRecordWithSession.environment}, NOW(), NOW())
+            ON CONFLICT (id, project_id)
+            DO NOTHING
+          `;
+        } catch (e) {
+          logger.error(
+            `Failed to upsert session ${traceRecordWithSession.session_id}`,
+            e,
+          );
+          throw e;
+        }
       }
-    }
 
-    // Add trace into trace upsert queue for eval processing
-    // First check if we already know this project has no job configurations
-    const hasNoJobConfigs = await hasNoEvalConfigsCache(
-      projectId,
-      "traceBased",
-    );
-    if (hasNoJobConfigs) {
-      logger.debug(
-        `Skipping TraceUpsert queue for project ${projectId} - no job configs cached`,
+      // Add trace into trace upsert queue for eval processing
+      // First check if we already know this project has no job configurations
+      const hasNoJobConfigs = await hasNoEvalConfigsCache(
+        projectId,
+        "traceBased",
       );
-      return;
-    } else {
+      if (hasNoJobConfigs) {
+        logger.debug(
+          `Skipping TraceUpsert queue for project ${projectId} - no job configs cached`,
+        );
+        return;
+      }
+
       // Job configs present, so we add to the TraceUpsert queue.
       const shardingKey = `${projectId}-${entityId}`;
       const traceUpsertQueue = TraceUpsertQueue.getInstance({ shardingKey });
@@ -826,7 +898,16 @@ export class IngestionService {
         timestamp: new Date(),
         name: QueueJobs.TraceUpsert as const,
       });
+    };
+
+    if (
+      this.deferPostCommitAction(clickhouseWriteContext, runPostCommitActions)
+    ) {
+      return;
     }
+
+    await Promise.all(clickhouseWritePromises);
+    await runPostCommitActions();
   }
 
   private async processObservationEventList(params: {
@@ -835,6 +916,7 @@ export class IngestionService {
     createdAtTimestamp: Date;
     observationEventList: ObservationEvent[];
     writeToStagingTables: boolean;
+    clickhouseWriteContext?: ClickhouseWriteContext;
   }) {
     const {
       projectId,
@@ -842,6 +924,7 @@ export class IngestionService {
       createdAtTimestamp,
       observationEventList,
       writeToStagingTables,
+      clickhouseWriteContext,
     } = params;
     if (observationEventList.length === 0) return;
 
@@ -967,21 +1050,21 @@ export class IngestionService {
         is_deleted: 0,
       };
 
-      clickhouseWritePromises.push(
-        this.clickHouseWriter.addToQueueAndWait(
-          TableName.Traces,
-          wrapperTraceRecord,
-        ),
-      );
+      this.enqueueDurableWrite({
+        tableName: TableName.Traces,
+        record: wrapperTraceRecord,
+        clickhouseWriteContext,
+        clickhouseWritePromises,
+      });
       finalObservationRecord.trace_id = finalObservationRecord.id;
     }
 
-    clickhouseWritePromises.push(
-      this.clickHouseWriter.addToQueueAndWait(
-        TableName.Observations,
-        finalObservationRecord,
-      ),
-    );
+    this.enqueueDurableWrite({
+      tableName: TableName.Observations,
+      record: finalObservationRecord,
+      clickhouseWriteContext,
+      clickhouseWritePromises,
+    });
 
     // Dual-write to staging table for batch propagation to events table
     // Here, we add some additional logic around the first seen timestamp.

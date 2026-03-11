@@ -196,6 +196,57 @@ describe("ClickhouseWriter", () => {
     ]);
   });
 
+  it("should defer commit-group writes until the group is committed", async () => {
+    const mockInsert = vi
+      .spyOn(clickhouseClientMock, "insert")
+      .mockResolvedValue();
+
+    const commitGroup = writer.createCommitGroup();
+    writer.addToCommitGroup(
+      TableName.Traces,
+      { id: "1", project_id: "project-1", event_ts: 1000, name: "test" } as any,
+      commitGroup,
+    );
+
+    await vi.advanceTimersByTimeAsync(writer.syncFlushDelay + 10);
+
+    expect(mockInsert).not.toHaveBeenCalled();
+
+    const commitPromise = writer.commitGroup(commitGroup);
+    await vi.advanceTimersByTimeAsync(writer.syncFlushDelay + 10);
+
+    await expect(commitPromise).resolves.toBeUndefined();
+    expect(mockInsert).toHaveBeenCalledTimes(1);
+  });
+
+  it("should coalesce grouped awaited writes into one table flush", async () => {
+    const mockInsert = vi
+      .spyOn(clickhouseClientMock, "insert")
+      .mockResolvedValue();
+
+    const commitGroup = writer.createCommitGroup();
+    writer.addToCommitGroup(
+      TableName.Traces,
+      { id: "1", project_id: "project-1", event_ts: 1000, name: "test-1" } as any,
+      commitGroup,
+    );
+    writer.addToCommitGroup(
+      TableName.Traces,
+      { id: "2", project_id: "project-1", event_ts: 1001, name: "test-2" } as any,
+      commitGroup,
+    );
+
+    const commitPromise = writer.commitGroup(commitGroup);
+    await vi.advanceTimersByTimeAsync(writer.syncFlushDelay + 10);
+
+    await expect(commitPromise).resolves.toBeUndefined();
+    expect(mockInsert).toHaveBeenCalledTimes(1);
+    expect(mockInsert.mock.calls[0][0].values).toEqual([
+      expect.objectContaining({ id: "1" }),
+      expect.objectContaining({ id: "2" }),
+    ]);
+  });
+
   it("should handle errors and retry", async () => {
     const mockInsert = vi
       .spyOn(clickhouseClientMock, "insert")

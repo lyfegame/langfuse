@@ -4,13 +4,17 @@ import { QueueName, type TQueueJobTypes } from "@langfuse/shared/src/server";
 
 const {
   mergeAndWriteMock,
-  addToQueueAndWaitMock,
+  createCommitGroupMock,
+  addToCommitGroupMock,
+  commitGroupMock,
   redisExistsMock,
   redisSetMock,
   downloadMock,
 } = vi.hoisted(() => ({
   mergeAndWriteMock: vi.fn(),
-  addToQueueAndWaitMock: vi.fn(),
+  createCommitGroupMock: vi.fn(() => ({ touchedTables: new Set(), pendingWrites: [], isCommitted: false })),
+  addToCommitGroupMock: vi.fn(),
+  commitGroupMock: vi.fn(),
   redisExistsMock: vi.fn(),
   redisSetMock: vi.fn(),
   downloadMock: vi.fn(),
@@ -50,7 +54,9 @@ vi.mock("../../services/ClickhouseWriter", async (importOriginal) => {
     ...original,
     ClickhouseWriter: {
       getInstance: vi.fn().mockReturnValue({
-        addToQueueAndWait: addToQueueAndWaitMock,
+        createCommitGroup: createCommitGroupMock,
+        addToCommitGroup: addToCommitGroupMock,
+        commitGroup: commitGroupMock,
       }),
     },
   };
@@ -119,7 +125,9 @@ describe("ingestionQueueProcessorBuilder durability semantics", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mergeAndWriteMock.mockResolvedValue(undefined);
-    addToQueueAndWaitMock.mockResolvedValue(undefined);
+    createCommitGroupMock.mockClear();
+    addToCommitGroupMock.mockResolvedValue(undefined);
+    commitGroupMock.mockResolvedValue(undefined);
     redisExistsMock.mockResolvedValue(0);
     redisSetMock.mockResolvedValue("OK");
     downloadMock.mockResolvedValue(
@@ -138,20 +146,26 @@ describe("ingestionQueueProcessorBuilder durability semantics", () => {
     await processor(createJob());
 
     expect(mergeAndWriteMock).toHaveBeenCalledTimes(1);
-    expect(addToQueueAndWaitMock).toHaveBeenCalledWith(
+    expect(createCommitGroupMock).toHaveBeenCalledTimes(1);
+    expect(addToCommitGroupMock).toHaveBeenCalledWith(
       TableName.BlobStorageFileLog,
       expect.objectContaining({
         project_id: "project-1",
         event_id: "file-1",
         entity_id: "trace-1",
       }),
+      expect.any(Object),
     );
+    expect(commitGroupMock).toHaveBeenCalledTimes(1);
     expect(redisSetMock).toHaveBeenCalled();
 
     expect(mergeAndWriteMock.mock.invocationCallOrder[0]).toBeLessThan(
-      addToQueueAndWaitMock.mock.invocationCallOrder[0],
+      addToCommitGroupMock.mock.invocationCallOrder[0],
     );
-    expect(addToQueueAndWaitMock.mock.invocationCallOrder[0]).toBeLessThan(
+    expect(addToCommitGroupMock.mock.invocationCallOrder[0]).toBeLessThan(
+      commitGroupMock.mock.invocationCallOrder[0],
+    );
+    expect(commitGroupMock.mock.invocationCallOrder[0]).toBeLessThan(
       redisSetMock.mock.invocationCallOrder[0],
     );
   });
@@ -162,7 +176,8 @@ describe("ingestionQueueProcessorBuilder durability semantics", () => {
 
     await expect(processor(createJob())).rejects.toThrow("boom");
 
-    expect(addToQueueAndWaitMock).not.toHaveBeenCalled();
+    expect(addToCommitGroupMock).not.toHaveBeenCalled();
+    expect(commitGroupMock).not.toHaveBeenCalled();
     expect(redisSetMock).not.toHaveBeenCalled();
   });
 });
