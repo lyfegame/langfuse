@@ -3,6 +3,7 @@ import {
   checkHeaderBasedDirectWrite,
   checkSdkVersionRequirements,
   getSdkInfoFromResourceSpans,
+  synthesizeMissingTraceCreateEvents,
   type SdkInfo,
 } from "../otelIngestionQueue";
 
@@ -231,5 +232,146 @@ describe("getSdkInfoFromResourceSpans (legacy fallback)", () => {
     },
   ])("$label", ({ input, expected }) => {
     expect(getSdkInfoFromResourceSpans(input)).toEqual(expected);
+  });
+});
+
+describe("synthesizeMissingTraceCreateEvents", () => {
+  it("synthesizes one shallow trace-create per missing observation trace", () => {
+    const observations = [
+      {
+        id: "event-1",
+        type: "span-create",
+        timestamp: "2026-03-11T18:15:19.422Z",
+        body: {
+          id: "obs-1",
+          traceId: "trace-1",
+          startTime: "2026-03-11T18:15:19.422Z",
+          endTime: "2026-03-11T18:15:20.422Z",
+          environment: "production",
+          metadata: {
+            langfuse_session_id: "session-1",
+            thread_id: "thread-1",
+            langfuse_user_id: "user-1",
+            langfuse_tags: ["tag-a", "tag-b", "tag-a"],
+          },
+        },
+      },
+      {
+        id: "event-2",
+        type: "generation-create",
+        timestamp: "2026-03-11T18:15:21.000Z",
+        body: {
+          id: "obs-2",
+          traceId: "trace-1",
+          startTime: "2026-03-11T18:15:21.000Z",
+          endTime: "2026-03-11T18:15:22.000Z",
+          completionStartTime: null,
+          environment: "production",
+          metadata: {
+            thread_id: "thread-1",
+          },
+        },
+      },
+    ] as unknown as Parameters<
+      typeof synthesizeMissingTraceCreateEvents
+    >[0]["observations"];
+
+    const synthesized = synthesizeMissingTraceCreateEvents({
+      observations,
+      traces: [],
+    });
+
+    expect(synthesized).toHaveLength(1);
+    expect(synthesized[0]).toMatchObject({
+      type: "trace-create",
+      timestamp: "2026-03-11T18:15:19.422Z",
+      body: {
+        id: "trace-1",
+        timestamp: "2026-03-11T18:15:19.422Z",
+        environment: "production",
+        sessionId: "session-1",
+        userId: "user-1",
+        tags: ["tag-a", "tag-b"],
+        metadata: {
+          langfuse_session_id: "session-1",
+          thread_id: "thread-1",
+          langfuse_user_id: "user-1",
+        },
+      },
+    });
+    expect(synthesized[0].id).toBeTruthy();
+  });
+
+  it("falls back to thread_id when session metadata is absent", () => {
+    const observations = [
+      {
+        id: "event-3",
+        type: "event-create",
+        timestamp: "2026-03-11T18:20:00.000Z",
+        body: {
+          id: "obs-3",
+          traceId: "trace-2",
+          startTime: "2026-03-11T18:20:00.000Z",
+          environment: "default",
+          metadata: {
+            thread_id: "thread-2",
+          },
+        },
+      },
+    ] as unknown as Parameters<
+      typeof synthesizeMissingTraceCreateEvents
+    >[0]["observations"];
+
+    const synthesized = synthesizeMissingTraceCreateEvents({
+      observations,
+      traces: [],
+    });
+
+    expect(synthesized).toHaveLength(1);
+    expect(synthesized[0].body.sessionId).toBe("thread-2");
+    expect(synthesized[0].body.metadata).toEqual({
+      thread_id: "thread-2",
+    });
+  });
+
+  it("skips trace ids that already have a trace-create event", () => {
+    const observations = [
+      {
+        id: "event-4",
+        type: "span-create",
+        timestamp: "2026-03-11T18:25:00.000Z",
+        body: {
+          id: "obs-4",
+          traceId: "trace-3",
+          startTime: "2026-03-11T18:25:00.000Z",
+          endTime: "2026-03-11T18:25:01.000Z",
+          environment: "production",
+        },
+      },
+    ] as unknown as Parameters<
+      typeof synthesizeMissingTraceCreateEvents
+    >[0]["observations"];
+
+    const traces = [
+      {
+        id: "trace-event-1",
+        type: "trace-create",
+        timestamp: "2026-03-11T18:24:59.000Z",
+        body: {
+          id: "trace-3",
+          timestamp: "2026-03-11T18:24:59.000Z",
+          environment: "production",
+        },
+      },
+    ] as unknown as Parameters<
+      typeof synthesizeMissingTraceCreateEvents
+    >[0]["traces"];
+
+    const synthesized = synthesizeMissingTraceCreateEvents({
+      observations,
+      traces,
+    });
+
+    expect(synthesized).toEqual([]);
   });
 });

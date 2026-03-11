@@ -10,7 +10,7 @@
   "scripts": {
     "test": "dotenv -e ../.env -- vitest run --pool=forks --poolOptions.forks.singleFork=true",
     "test:health": "dotenv -e ../.env -- vitest run src/features/health/*.test.ts",
-    "test:durability": "dotenv -e ../.env -- vitest run --pool=forks --poolOptions.forks.singleFork=true src/services/ClickhouseWriter/ClickhouseWriter.unit.test.ts src/queues/__tests__/ingestionQueue.test.ts",
+    "test:durability": "dotenv -e ../.env -- vitest run --pool=forks --poolOptions.forks.singleFork=true src/services/ClickhouseWriter/ClickhouseWriter.unit.test.ts src/queues/__tests__/ingestionQueue.test.ts src/queues/__tests__/otelDirectEventWrite.test.ts",
     "test:exclude-llm-connections": "dotenv -e ../.env -- vitest run --pool=forks --poolOptions.forks.singleFork=true --exclude '**/llmConnections.test.ts'",
     "test:llm-connections-only": "dotenv -e ../.env -- vitest run --pool=forks --poolOptions.forks.singleFork=true llmConnections.test.ts",
     "coverage": "vitest run --coverage",
