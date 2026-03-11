@@ -1,3 +1,4 @@
+import { randomUUID } from "crypto";
 import { Job, Processor } from "bullmq";
 import {
   clickhouseClient,
@@ -119,6 +120,137 @@ export function getSdkInfoFromResourceSpans(
     logger.warn("Failed to extract SDK info from resourceSpans", error);
     return { scopeName: null, scopeVersion: null, telemetrySdkLanguage: null };
   }
+}
+
+type TraceCreateEvent = Extract<IngestionEventType, { type: "trace-create" }>;
+
+const DEFAULT_TRACE_ENVIRONMENT = "default";
+
+function getObservationMetadataRecord(
+  metadata: unknown,
+): Record<string, unknown> | undefined {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+    return undefined;
+  }
+
+  return metadata as Record<string, unknown>;
+}
+
+function getMetadataStringValue(
+  metadata: Record<string, unknown> | undefined,
+  key: string,
+): string | undefined {
+  const value = metadata?.[key];
+  return typeof value === "string" && value.trim().length > 0
+    ? value
+    : undefined;
+}
+
+function getMetadataTags(
+  metadata: Record<string, unknown> | undefined,
+): string[] | undefined {
+  const raw = metadata?.langfuse_tags;
+
+  const normalize = (candidate: unknown): string[] | undefined => {
+    if (!Array.isArray(candidate)) {
+      return undefined;
+    }
+
+    const tags = candidate.filter(
+      (value): value is string =>
+        typeof value === "string" && value.trim().length > 0,
+    );
+
+    return tags.length > 0 ? Array.from(new Set(tags)) : undefined;
+  };
+
+  const fromArray = normalize(raw);
+  if (fromArray) {
+    return fromArray;
+  }
+
+  if (typeof raw === "string") {
+    try {
+      return normalize(JSON.parse(raw));
+    } catch {
+      return undefined;
+    }
+  }
+
+  return undefined;
+}
+
+export function synthesizeMissingTraceCreateEvents(params: {
+  observations: IngestionEventType[];
+  traces: IngestionEventType[];
+}): TraceCreateEvent[] {
+  const existingTraceIds = new Set(
+    params.traces
+      .filter(
+        (event): event is TraceCreateEvent => event.type === "trace-create",
+      )
+      .map((event) => event.body.id)
+      .filter((traceId): traceId is string => Boolean(traceId)),
+  );
+
+  const synthesized = new Map<string, TraceCreateEvent>();
+
+  for (const event of params.observations) {
+    if (getClickhouseEntityType(event.type) !== "observation") {
+      continue;
+    }
+
+    const body = event.body as {
+      traceId?: string | null;
+      startTime?: string | null;
+      environment?: string | null;
+      metadata?: unknown;
+    };
+    const traceId = body.traceId;
+
+    if (!traceId || existingTraceIds.has(traceId) || synthesized.has(traceId)) {
+      continue;
+    }
+
+    const metadata = getObservationMetadataRecord(body.metadata);
+    const langfuseSessionId = getMetadataStringValue(
+      metadata,
+      "langfuse_session_id",
+    );
+    const threadId = getMetadataStringValue(metadata, "thread_id");
+    const userId = getMetadataStringValue(metadata, "langfuse_user_id");
+    const tags = getMetadataTags(metadata);
+
+    const promotedMetadata = Object.fromEntries(
+      [
+        ["langfuse_session_id", langfuseSessionId],
+        ["thread_id", threadId],
+        ["langfuse_user_id", userId],
+      ].filter((entry): entry is [string, string] => Boolean(entry[1])),
+    );
+
+    const traceTimestamp = body.startTime ?? event.timestamp;
+
+    synthesized.set(traceId, {
+      id: randomUUID(),
+      type: "trace-create",
+      timestamp: traceTimestamp,
+      body: {
+        id: traceId,
+        timestamp: traceTimestamp,
+        environment: body.environment ?? DEFAULT_TRACE_ENVIRONMENT,
+        sessionId: langfuseSessionId ?? threadId,
+        userId,
+        tags,
+        metadata:
+          Object.keys(promotedMetadata).length > 0
+            ? promotedMetadata
+            : undefined,
+      },
+    });
+  }
+
+  return Array.from(synthesized.values());
 }
 
 /**
@@ -263,6 +395,25 @@ export const otelIngestionQueueProcessor: Processor = async (
         }
         return [o.data];
       });
+
+    const syntheticTraceCreateEvents = synthesizeMissingTraceCreateEvents({
+      observations,
+      traces,
+    });
+    if (syntheticTraceCreateEvents.length > 0) {
+      traces.push(...syntheticTraceCreateEvents);
+      logger.info(
+        `Synthesized ${syntheticTraceCreateEvents.length} shallow trace-create events for project ${projectId} in ${fileKey}`,
+      );
+      recordDistribution(
+        "langfuse.ingestion.otel.synthetic_trace_create_count",
+        syntheticTraceCreateEvents.length,
+      );
+      span?.setAttribute(
+        "langfuse.ingestion.otel.synthetic_trace_create_count",
+        syntheticTraceCreateEvents.length,
+      );
+    }
 
     // In the next row, we only consider observations. The traces will be recorded in processEventBatch.
     recordIncrement("langfuse.ingestion.event", observations.length, {
