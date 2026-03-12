@@ -257,7 +257,9 @@ export function synthesizeMissingTraceCreateEvents(params: {
 
 type EventWithBodyId = { body: { id?: string | null } };
 
-function groupEventsByEntityId<T extends EventWithBodyId>(events: T[]): Map<string, T[]> {
+function groupEventsByEntityId<T extends EventWithBodyId>(
+  events: T[],
+): Map<string, T[]> {
   const grouped = new Map<string, T[]>();
 
   for (const event of events) {
@@ -318,17 +320,18 @@ export async function writeInlineOtelEntities(params: {
       ),
   );
 
-  const inlineObservationWrites = Array.from(groupEventsByEntityId(observations)).map(
-    ([observationId, groupedObservationEvents]) =>
-      ingestionService.mergeAndWrite(
-        "observation",
-        projectId,
-        observationId,
-        createdAtTimestamp,
-        groupedObservationEvents,
-        forwardToEventsTable,
-        clickhouseWriteContext,
-      ),
+  const inlineObservationWrites = Array.from(
+    groupEventsByEntityId(observations),
+  ).map(([observationId, groupedObservationEvents]) =>
+    ingestionService.mergeAndWrite(
+      "observation",
+      projectId,
+      observationId,
+      createdAtTimestamp,
+      groupedObservationEvents,
+      forwardToEventsTable,
+      clickhouseWriteContext,
+    ),
   );
 
   await Promise.all([...inlineTraceWrites, ...inlineObservationWrites]);

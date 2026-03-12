@@ -377,7 +377,6 @@ describe("synthesizeMissingTraceCreateEvents", () => {
   });
 });
 
-
 describe("writeInlineOtelEntities", () => {
   it("coalesces OTEL trace and observation writes into one durable commit group", async () => {
     const commitGroup = {
