@@ -13,6 +13,9 @@ const mocks = vi.hoisted(() => ({
   deleteFiles: vi.fn(),
   getInstance: vi.fn(),
   getTracesForBlobStorageExportParquet: vi.fn(),
+  getObservationsForBlobStorageExportParquet: vi.fn(),
+  getScoresForBlobStorageExportParquet: vi.fn(),
+  queryClickhouse: vi.fn(),
   logger: {
     info: vi.fn(),
     warn: vi.fn(),
@@ -71,10 +74,12 @@ vi.mock("@langfuse/shared/src/server", async () => {
     },
     getTracesForBlobStorageExportParquet:
       mocks.getTracesForBlobStorageExportParquet,
-    getObservationsForBlobStorageExportParquet: vi.fn(),
-    getScoresForBlobStorageExportParquet: vi.fn(),
+    getObservationsForBlobStorageExportParquet:
+      mocks.getObservationsForBlobStorageExportParquet,
+    getScoresForBlobStorageExportParquet:
+      mocks.getScoresForBlobStorageExportParquet,
     getEventsForBlobStorageExport: vi.fn(),
-    queryClickhouse: vi.fn(),
+    queryClickhouse: mocks.queryClickhouse,
     getCurrentSpan: vi.fn().mockReturnValue(null),
     BlobStorageIntegrationProcessingQueue: {
       getInstance: vi.fn().mockReturnValue(null),
@@ -132,6 +137,18 @@ describe("handleBlobStorageIntegrationProjectJob parquet validation", () => {
 
     mocks.findUnique.mockResolvedValue(createIntegration());
     mocks.update.mockResolvedValue(undefined);
+    mocks.queryClickhouse.mockResolvedValue([
+      {
+        traces_max_ms: Date.parse("2026-03-06T09:45:00.000Z"),
+        observations_max_ms: Date.parse("2026-03-06T09:45:00.000Z"),
+      },
+    ]);
+    mocks.getObservationsForBlobStorageExportParquet.mockResolvedValue(
+      Readable.from([Buffer.alloc(0)]),
+    );
+    mocks.getScoresForBlobStorageExportParquet.mockResolvedValue(
+      Readable.from([Buffer.alloc(0)]),
+    );
     mocks.getInstance.mockReturnValue({
       uploadFile: mocks.uploadFile,
       deleteFiles: mocks.deleteFiles,
@@ -203,6 +220,14 @@ describe("handleBlobStorageIntegrationProjectJob parquet validation", () => {
 
     expect(mocks.update).toHaveBeenCalledTimes(1);
     expect(mocks.deleteFiles).not.toHaveBeenCalled();
+    expect(mocks.queryClickhouse).toHaveBeenCalledWith(
+      expect.objectContaining({
+        params: expect.objectContaining({
+          projectId: PROJECT_ID,
+          minTimestamp: new Date("2026-03-06T09:29:15.000Z"),
+        }),
+      }),
+    );
     const updateInput = mocks.update.mock.calls[0][0];
     expect(updateInput.where).toEqual({ projectId: PROJECT_ID });
     expect(updateInput.data.lastSyncAt.toISOString()).toBe(
@@ -211,5 +236,91 @@ describe("handleBlobStorageIntegrationProjectJob parquet validation", () => {
     expect(updateInput.data.nextSyncAt.toISOString()).toBe(
       "2026-03-06T10:30:00.000Z",
     );
+  });
+
+  it("clamps the export window to the source watermark when ingestion lags", async () => {
+    const validParquet = Buffer.alloc(2048);
+    validParquet[0] = 0x50;
+    validParquet[1] = 0x41;
+    validParquet[2] = 0x52;
+    validParquet[3] = 0x31;
+    validParquet.writeUInt32LE(64, 2040);
+    validParquet[2044] = 0x50;
+    validParquet[2045] = 0x41;
+    validParquet[2046] = 0x52;
+    validParquet[2047] = 0x31;
+
+    mocks.findUnique.mockResolvedValue({
+      ...createIntegration(),
+      exportFrequency: "15m",
+      lastSyncAt: new Date("2026-03-06T09:00:00.000Z"),
+    });
+    mocks.queryClickhouse.mockResolvedValue([
+      {
+        traces_max_ms: Date.parse("2026-03-06T09:10:00.000Z"),
+        observations_max_ms: Date.parse("2026-03-06T09:10:00.000Z"),
+      },
+    ]);
+    mocks.getTracesForBlobStorageExportParquet.mockResolvedValue(
+      Readable.from([validParquet]),
+    );
+
+    await expect(
+      handleBlobStorageIntegrationProjectJob({
+        data: { payload: { projectId: PROJECT_ID } },
+      } as never),
+    ).resolves.toBeUndefined();
+
+    expect(mocks.queryClickhouse).toHaveBeenCalledWith(
+      expect.objectContaining({
+        params: expect.objectContaining({
+          projectId: PROJECT_ID,
+          minTimestamp: new Date("2026-03-06T09:00:00.000Z"),
+        }),
+      }),
+    );
+    expect(mocks.getTracesForBlobStorageExportParquet).toHaveBeenCalledWith(
+      PROJECT_ID,
+      new Date("2026-03-06T09:00:00.000Z"),
+      new Date("2026-03-06T09:10:00.000Z"),
+    );
+    const updateInput = mocks.update.mock.calls[0][0];
+    expect(updateInput.data.lastSyncAt.toISOString()).toBe(
+      "2026-03-06T09:10:00.000Z",
+    );
+    expect(updateInput.data.nextSyncAt.toISOString()).toBe(
+      "2026-03-06T09:25:00.000Z",
+    );
+  });
+
+  it("does not advance the cursor when the source watermark is behind the current cursor", async () => {
+    mocks.findUnique.mockResolvedValue({
+      ...createIntegration(),
+      exportFrequency: "15m",
+      lastSyncAt: new Date("2026-03-06T09:29:15.000Z"),
+    });
+    mocks.queryClickhouse.mockResolvedValue([
+      {
+        traces_max_ms: Date.parse("2026-03-06T09:10:00.000Z"),
+        observations_max_ms: Date.parse("2026-03-06T09:10:00.000Z"),
+      },
+    ]);
+
+    await expect(
+      handleBlobStorageIntegrationProjectJob({
+        data: { payload: { projectId: PROJECT_ID } },
+      } as never),
+    ).resolves.toBeUndefined();
+
+    expect(mocks.queryClickhouse).toHaveBeenCalledWith(
+      expect.objectContaining({
+        params: expect.objectContaining({
+          projectId: PROJECT_ID,
+          minTimestamp: new Date("2026-03-06T09:29:15.000Z"),
+        }),
+      }),
+    );
+    expect(mocks.getTracesForBlobStorageExportParquet).not.toHaveBeenCalled();
+    expect(mocks.update).not.toHaveBeenCalled();
   });
 });
