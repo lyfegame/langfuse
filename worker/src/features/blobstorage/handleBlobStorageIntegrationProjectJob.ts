@@ -71,7 +71,9 @@ const getMinTimestampForExport = async (
               )
               WHERE ts > 0 -- Ignore 0 results (usually empty tables)
             `,
-          params: { projectId },
+          params: {
+            projectId,
+          },
         });
 
         // Extract the minimum timestamp
@@ -142,6 +144,7 @@ const parseEpochMs = (
 const getSourceWatermarkForExport = async (
   projectId: string,
   exportSource: AnalyticsIntegrationExportSource,
+  minTimestamp: Date,
 ): Promise<Date | null> => {
   if (
     exportSource !== "TRACES_OBSERVATIONS" &&
@@ -159,23 +162,25 @@ const getSourceWatermarkForExport = async (
             FROM traces
             WHERE project_id = {projectId: String}
               AND is_deleted = 0
+              AND timestamp >= {minTimestamp: DateTime64(3)}
           ) AS traces_max_ms,
           (
             SELECT max(toUnixTimestamp64Milli(start_time))
             FROM observations
             WHERE project_id = {projectId: String}
               AND is_deleted = 0
+              AND start_time >= {minTimestamp: DateTime64(3)}
           ) AS observations_max_ms
       `,
-      params: { projectId },
+      params: {
+        projectId,
+        minTimestamp,
+      },
       tags: {
         feature: "blobstorage",
         type: "watermark",
         kind: "analytic",
         projectId,
-      },
-      clickhouseConfigs: {
-        request_timeout: env.LANGFUSE_CLICKHOUSE_DATA_EXPORT_REQUEST_TIMEOUT_MS,
       },
       preferredClickhouseService: "Export",
     });
@@ -201,6 +206,7 @@ const getSourceWatermarkForExport = async (
       projectId,
       exportSource,
       sourceWatermark: watermark.toISOString(),
+      minTimestamp: minTimestamp.toISOString(),
     });
     return watermark;
   } catch (error) {
@@ -570,6 +576,7 @@ export const handleBlobStorageIntegrationProjectJob = async (
   const sourceWatermark = await getSourceWatermarkForExport(
     projectId,
     blobStorageIntegration.exportSource,
+    minTimestamp,
   );
   const uncappedMaxTimestamp = new Date(
     Math.min(

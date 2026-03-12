@@ -220,6 +220,14 @@ describe("handleBlobStorageIntegrationProjectJob parquet validation", () => {
 
     expect(mocks.update).toHaveBeenCalledTimes(1);
     expect(mocks.deleteFiles).not.toHaveBeenCalled();
+    expect(mocks.queryClickhouse).toHaveBeenCalledWith(
+      expect.objectContaining({
+        params: expect.objectContaining({
+          projectId: PROJECT_ID,
+          minTimestamp: new Date("2026-03-06T09:29:15.000Z"),
+        }),
+      }),
+    );
     const updateInput = mocks.update.mock.calls[0][0];
     expect(updateInput.where).toEqual({ projectId: PROJECT_ID });
     expect(updateInput.data.lastSyncAt.toISOString()).toBe(
@@ -263,6 +271,14 @@ describe("handleBlobStorageIntegrationProjectJob parquet validation", () => {
       } as never),
     ).resolves.toBeUndefined();
 
+    expect(mocks.queryClickhouse).toHaveBeenCalledWith(
+      expect.objectContaining({
+        params: expect.objectContaining({
+          projectId: PROJECT_ID,
+          minTimestamp: new Date("2026-03-06T09:00:00.000Z"),
+        }),
+      }),
+    );
     expect(mocks.getTracesForBlobStorageExportParquet).toHaveBeenCalledWith(
       PROJECT_ID,
       new Date("2026-03-06T09:00:00.000Z"),
@@ -296,6 +312,14 @@ describe("handleBlobStorageIntegrationProjectJob parquet validation", () => {
       } as never),
     ).resolves.toBeUndefined();
 
+    expect(mocks.queryClickhouse).toHaveBeenCalledWith(
+      expect.objectContaining({
+        params: expect.objectContaining({
+          projectId: PROJECT_ID,
+          minTimestamp: new Date("2026-03-06T09:29:15.000Z"),
+        }),
+      }),
+    );
     expect(mocks.getTracesForBlobStorageExportParquet).not.toHaveBeenCalled();
     expect(mocks.update).not.toHaveBeenCalled();
   });
