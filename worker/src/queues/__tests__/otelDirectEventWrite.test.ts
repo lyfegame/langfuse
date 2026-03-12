@@ -1,9 +1,10 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   checkHeaderBasedDirectWrite,
   checkSdkVersionRequirements,
   getSdkInfoFromResourceSpans,
   synthesizeMissingTraceCreateEvents,
+  writeInlineOtelEntities,
   type SdkInfo,
 } from "../otelIngestionQueue";
 
@@ -373,5 +374,138 @@ describe("synthesizeMissingTraceCreateEvents", () => {
     });
 
     expect(synthesized).toEqual([]);
+  });
+});
+
+describe("writeInlineOtelEntities", () => {
+  it("coalesces OTEL trace and observation writes into one durable commit group", async () => {
+    const commitGroup = {
+      touchedTables: new Set(),
+      pendingWrites: [],
+      isCommitted: false,
+    };
+    const mergeAndWrite = vi.fn().mockResolvedValue(undefined);
+    const commitGroupSpy = vi.fn().mockResolvedValue(undefined);
+
+    await writeInlineOtelEntities({
+      ingestionService: {
+        mergeAndWrite,
+      } as never,
+      clickhouseWriter: {
+        createCommitGroup: () => commitGroup,
+        commitGroup: commitGroupSpy,
+      } as never,
+      projectId: "project-1",
+      traceEvents: [
+        {
+          id: "trace-event-1",
+          type: "trace-create",
+          timestamp: "2026-03-11T21:00:00.000Z",
+          body: {
+            id: "trace-1",
+            timestamp: "2026-03-11T21:00:00.000Z",
+            environment: "default",
+          },
+        },
+        {
+          id: "trace-event-2",
+          type: "trace-create",
+          timestamp: "2026-03-11T21:00:01.000Z",
+          body: {
+            id: "trace-1",
+            timestamp: "2026-03-11T21:00:01.000Z",
+            environment: "default",
+          },
+        },
+      ] as never,
+      observations: [
+        {
+          id: "obs-event-1",
+          type: "span-create",
+          timestamp: "2026-03-11T21:00:00.500Z",
+          body: {
+            id: "obs-1",
+            traceId: "trace-1",
+            name: "step",
+            startTime: "2026-03-11T21:00:00.500Z",
+            environment: "default",
+          },
+        },
+        {
+          id: "obs-event-2",
+          type: "span-create",
+          timestamp: "2026-03-11T21:00:01.500Z",
+          body: {
+            id: "obs-1",
+            traceId: "trace-1",
+            name: "step",
+            startTime: "2026-03-11T21:00:01.500Z",
+            environment: "default",
+          },
+        },
+      ] as never,
+      forwardToEventsTable: false,
+      createdAtTimestamp: new Date("2026-03-11T21:00:05.000Z"),
+    });
+
+    expect(mergeAndWrite).toHaveBeenCalledTimes(2);
+    expect(mergeAndWrite).toHaveBeenNthCalledWith(
+      1,
+      "trace",
+      "project-1",
+      "trace-1",
+      new Date("2026-03-11T21:00:05.000Z"),
+      expect.arrayContaining([
+        expect.objectContaining({ id: "trace-event-1" }),
+        expect.objectContaining({ id: "trace-event-2" }),
+      ]),
+      false,
+      expect.objectContaining({
+        commitGroup,
+        postCommitActions: expect.any(Array),
+      }),
+    );
+    expect(mergeAndWrite).toHaveBeenNthCalledWith(
+      2,
+      "observation",
+      "project-1",
+      "obs-1",
+      new Date("2026-03-11T21:00:05.000Z"),
+      expect.arrayContaining([
+        expect.objectContaining({ id: "obs-event-1" }),
+        expect.objectContaining({ id: "obs-event-2" }),
+      ]),
+      false,
+      expect.objectContaining({
+        commitGroup,
+        postCommitActions: expect.any(Array),
+      }),
+    );
+    expect(commitGroupSpy).toHaveBeenCalledTimes(1);
+    expect(commitGroupSpy).toHaveBeenCalledWith(commitGroup);
+  });
+
+  it("skips the commit path when there are no inline OTEL entities", async () => {
+    const mergeAndWrite = vi.fn().mockResolvedValue(undefined);
+    const commitGroupSpy = vi.fn().mockResolvedValue(undefined);
+    const createCommitGroupSpy = vi.fn();
+
+    await writeInlineOtelEntities({
+      ingestionService: {
+        mergeAndWrite,
+      } as never,
+      clickhouseWriter: {
+        createCommitGroup: createCommitGroupSpy,
+        commitGroup: commitGroupSpy,
+      } as never,
+      projectId: "project-1",
+      traceEvents: [],
+      observations: [],
+      forwardToEventsTable: false,
+    });
+
+    expect(mergeAndWrite).not.toHaveBeenCalled();
+    expect(createCommitGroupSpy).not.toHaveBeenCalled();
+    expect(commitGroupSpy).not.toHaveBeenCalled();
   });
 });
