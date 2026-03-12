@@ -26,6 +26,7 @@ import {
 } from "@langfuse/shared";
 import { decrypt } from "@langfuse/shared/encryption";
 import { randomUUID } from "crypto";
+import { AnalyticsIntegrationExportSource } from "@prisma/client";
 import { env } from "../../env";
 import {
   createParquetValidationStream,
@@ -122,6 +123,98 @@ const getMinTimestampForExport = async (
  * Get the frequency interval in milliseconds for a given export frequency.
  * This is used to chunk historic exports into manageable time windows.
  */
+type BlobStorageExportWatermarkRow = {
+  traces_max_ms: number | string | null;
+  observations_max_ms: number | string | null;
+};
+
+const parseEpochMs = (
+  value: number | string | null | undefined,
+): number | null => {
+  if (value === null || value === undefined) {
+    return null;
+  }
+
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+};
+
+const getSourceWatermarkForExport = async (
+  projectId: string,
+  exportSource: AnalyticsIntegrationExportSource,
+): Promise<Date | null> => {
+  if (
+    exportSource !== "TRACES_OBSERVATIONS" &&
+    exportSource !== "TRACES_OBSERVATIONS_EVENTS"
+  ) {
+    return null;
+  }
+
+  try {
+    const result = await queryClickhouse<BlobStorageExportWatermarkRow>({
+      query: `
+        SELECT
+          (
+            SELECT max(toUnixTimestamp64Milli(timestamp))
+            FROM traces
+            WHERE project_id = {projectId: String}
+              AND is_deleted = 0
+          ) AS traces_max_ms,
+          (
+            SELECT max(toUnixTimestamp64Milli(start_time))
+            FROM observations
+            WHERE project_id = {projectId: String}
+              AND is_deleted = 0
+          ) AS observations_max_ms
+      `,
+      params: { projectId },
+      tags: {
+        feature: "blobstorage",
+        type: "watermark",
+        kind: "analytic",
+        projectId,
+      },
+      clickhouseConfigs: {
+        request_timeout: env.LANGFUSE_CLICKHOUSE_DATA_EXPORT_REQUEST_TIMEOUT_MS,
+      },
+      preferredClickhouseService: "Export",
+    });
+
+    const row = result[0];
+    const candidateWatermarks = [row?.traces_max_ms, row?.observations_max_ms]
+      .map(parseEpochMs)
+      .filter((value): value is number => value !== null);
+
+    if (candidateWatermarks.length === 0) {
+      logger.info({
+        message:
+          "[BLOB INTEGRATION] No source watermark found for export clamp",
+        projectId,
+        exportSource,
+      });
+      return null;
+    }
+
+    const watermark = new Date(Math.min(...candidateWatermarks));
+    logger.info({
+      message: "[BLOB INTEGRATION] Resolved source watermark for export clamp",
+      projectId,
+      exportSource,
+      sourceWatermark: watermark.toISOString(),
+    });
+    return watermark;
+  } catch (error) {
+    logger.error({
+      message:
+        "[BLOB INTEGRATION] Error querying ClickHouse for export source watermark",
+      projectId,
+      exportSource,
+      error,
+    });
+    throw new Error(`Failed to fetch export source watermark: ${error}`);
+  }
+};
+
 const getFrequencyIntervalMs = (frequency: string): number => {
   switch (frequency) {
     case "15m":
@@ -473,10 +566,32 @@ export const handleBlobStorageIntegrationProjectJob = async (
   });
 
   const now = new Date();
-  const uncappedMaxTimestamp = new Date(now.getTime() - 30 * 60 * 1000); // 30-minute lag buffer
+  const wallClockMaxTimestamp = new Date(now.getTime() - 30 * 60 * 1000); // 30-minute lag buffer
+  const sourceWatermark = await getSourceWatermarkForExport(
+    projectId,
+    blobStorageIntegration.exportSource,
+  );
+  const uncappedMaxTimestamp = new Date(
+    Math.min(
+      wallClockMaxTimestamp.getTime(),
+      sourceWatermark?.getTime() ?? Number.POSITIVE_INFINITY,
+    ),
+  );
   const frequencyIntervalMs = getFrequencyIntervalMs(
     blobStorageIntegration.exportFrequency,
   );
+
+  if (
+    sourceWatermark &&
+    sourceWatermark.getTime() < wallClockMaxTimestamp.getTime()
+  ) {
+    logger.info({
+      message: "[BLOB INTEGRATION] Clamped export horizon to source watermark",
+      projectId,
+      sourceWatermark: sourceWatermark.toISOString(),
+      wallClockMaxTimestamp: wallClockMaxTimestamp.toISOString(),
+    });
+  }
 
   // Use smaller chunks when catching up to reduce per-query ClickHouse memory.
   // Large observation tables can peak at high memory for wide time windows;
